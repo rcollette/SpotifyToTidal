@@ -20,7 +20,7 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
         HttpMethod method, string path, JsonTypeInfo<TResponse> responseType,
         string? serializedPayload = null, CancellationToken ct = default)
     {
-        for (int attempt = 0; attempt < 5; attempt++)
+        for (int attempt = 0; ; attempt++)
         {
             using var req = new HttpRequestMessage(method, new Uri(BaseUrl, path));
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await bearerToken());
@@ -44,7 +44,6 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
             return JsonSerializer.Deserialize(string.IsNullOrWhiteSpace(body) ? "{}" : body, responseType)
                 ?? throw new JsonException($"{Name} returned null JSON.");
         }
-        throw new InvalidOperationException("Unreachable.");
     }
 
     protected static string Escape(string s) => Uri.EscapeDataString(s);
