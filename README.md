@@ -84,14 +84,15 @@ The manually triggered workflow publishes four native-AOT release downloads:
 
 | Release asset | Platform |
 | --- | --- |
-| `SpotifyToTidal-v0.1.0-linux-x64.zip` | Linux x86-64 |
-| `SpotifyToTidal-v0.1.0-osx-arm64.zip` | macOS Apple Silicon |
-| `SpotifyToTidal-v0.1.0-osx-x64.zip` | macOS Intel |
+| `SpotifyToTidal-v0.1.0-linux-x64.tar.gz` | Linux x86-64 |
+| `SpotifyToTidal-v0.1.0-osx-arm64.tar.gz` | macOS Apple Silicon |
+| `SpotifyToTidal-v0.1.0-osx-x64.tar.gz` | macOS Intel |
 | `SpotifyToTidal-v0.1.0-win-x64.zip` | Windows x86-64 |
 
-Each ZIP contains a native self-contained executable, configuration example, and
-README. All archives are built on their target OS and smoke-tested before GitHub
-creates the version tag and attaches the ZIP files to the public **Releases** page.
+Each archive contains a native self-contained executable, configuration example, and
+README. Unix releases are `.tar.gz` files so extraction preserves executable permissions;
+Windows uses `.zip`. All archives are built on their target OS and smoke-tested before GitHub
+creates the version tag and attaches the archives to the public **Releases** page.
 No release is published on pull requests: those runs only verify the packaging and
 provide temporary CI artifacts. Version tags are immutable in this workflow—use a
 new version for each subsequent release. Both macOS archives are unsigned and
