@@ -50,13 +50,13 @@ jobs:
       - name: Publish Native AOT with warnings as errors
         shell: pwsh
         run: |
-          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:TreatWarningsAsErrors=true -o native-publish
+          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:TreatWarningsAsErrors=true
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Smoke-test and package release
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = (Resolve-Path 'native-publish').Path
+          $dir = (Resolve-Path 'bin/Release/net10.0/${{ matrix.rid }}/publish').Path
           $bin = Join-Path $dir '${{ matrix.binary }}'
           if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) { throw "Executable missing: $bin" }
           & $bin
