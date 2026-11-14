@@ -34,6 +34,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      # Generated code under obj/ is excluded; hand-authored production code is not.
       # Coverage is measured across BOTH test assemblies, not incorrectly
       # against each suite in isolation. The threshold applies to all app code.
       - name: Gather unit coverage
@@ -43,13 +44,15 @@ jobs:
             /p:CollectCoverage=true \
             /p:CoverletOutput="$(pwd)/coverage/" \
             /p:CoverletOutputFormat=json
+            /p:ExcludeByFile=**/obj/**
       - name: Merge acceptance coverage and enforce 100% on all three metrics
         run: |
           dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release \
             /p:CollectCoverage=true \
             /p:MergeWith="$(pwd)/coverage/coverage.json" \
             /p:CoverletOutput="$(pwd)/coverage/" \
-            /p:CoverletOutputFormat=json%2ccobertura \
+            /p:CoverletOutputFormat=json
+            /p:ExcludeByFile=**/obj/**%2ccobertura \
             /p:Threshold=100 \
             /p:ThresholdType=line%2cbranch%2cmethod \
             /p:ThresholdStat=total
