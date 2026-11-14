@@ -12,7 +12,8 @@ public sealed record AppSettings(string SpotifyClientId, string TidalClientId,
 
 public sealed record OAuthToken(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt);
 
-public sealed class OAuthManager(string dataDirectory, AppSettings settings, HttpClient http)
+public sealed class OAuthManager(string dataDirectory, AppSettings settings, HttpClient http,
+    Action<string>? browserOpener = null)
 {
     string TokenPath(string service) => Path.Combine(dataDirectory, service + "-token.json");
     string ClientId(string service) => service == "spotify" ? settings.SpotifyClientId : settings.TidalClientId;
@@ -47,7 +48,11 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
             "&scope=" + Encode(Scopes(service)) + "&state=" + state +
             "&code_challenge_method=S256&code_challenge=" + challenge;
         Console.WriteLine("Open in your browser:\n" + url);
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+        try
+        {
+            if (browserOpener is null) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            else browserOpener(url);
+        }
         catch { /* URL printed for headless terminals. */ }
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var context = await listener.GetContextAsync().WaitAsync(cts.Token);
