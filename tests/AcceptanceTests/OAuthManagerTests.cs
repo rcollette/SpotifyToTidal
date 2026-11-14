@@ -298,4 +298,37 @@ public sealed class OAuthManagerTests
         Assert.True(token?.ExpiresAt > DateTimeOffset.UtcNow);
     }
 
+    [Fact]
+    public async Task Default_browser_launch_path_still_supports_a_local_callback()
+    {
+        int port = FreeLoopbackPort();
+        var settings = Settings(port);
+        var server = new FakeTokenServer();
+        using var http = new HttpClient(server);
+        var manager = new OAuthManager(TemporaryPath(), settings, http);
+        var previousOut = Console.Out;
+        using var captured = new StringWriter();
+        Task login;
+        try
+        {
+            Console.SetOut(captured);
+            // Login prints the URL and attempts the normal desktop browser launch
+            // before its first asynchronous wait for the callback.
+            login = manager.Login("spotify");
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+        }
+        var urlLine = captured.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Single(l => l.StartsWith("https://accounts.spotify.com/authorize", StringComparison.Ordinal));
+        var state = QueryValue(new Uri(urlLine), "state");
+        using var callbackHttp = new HttpClient();
+        using var response = await callbackHttp.GetAsync(
+            settings.SpotifyRedirectUri + "?state=" + state + "&code=default-opener");
+        response.EnsureSuccessStatusCode();
+        await login.WaitAsync(TimeSpan.FromSeconds(12));
+        Assert.Equal(1, server.Calls);
+    }
+
 }
