@@ -15,12 +15,12 @@ Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 Register Spotify and TIDAL developer applications with compatible OAuth PKCE redirects.
 Spotify development-mode apps require an eligible Premium account.
 
-1. Copy \`appsettings.example.json\` to \`~/.spotify-to-tidal/config.json\`
-   (Windows: \`%USERPROFILE%\.spotify-to-tidal\config.json\`).
+1. Copy `appsettings.example.json` to `~/.spotify-to-tidal/config.json`
+   (Windows: `%USERPROFILE%\.spotify-to-tidal\config.json`).
 2. Fill in the public OAuth application client IDs and exact registered loopback redirect URLs.
 3. Execute:
 
-\`\`\`sh
+```sh
 dotnet run -- login spotify
 dotnet run -- login tidal
 dotnet run -- sync --dry-run
@@ -28,55 +28,63 @@ dotnet run -- sync
 dotnet run -- sync --direction spotify-to-tidal
 dotnet run -- sync --direction tidal-to-spotify
 dotnet run -- report
-\`\`\`
+```
 
 Sync **only adds** favorites. It does not delete/unlike songs on either service.
-Preview writes nothing; the CSV report lists statuses including \`would-add\`,
-\`added\`, \`already-present\`, \`unmatched\` and \`error\`. Re-running a partial
+Preview writes nothing; the CSV report lists statuses including `would-add`,
+`added`, `already-present`, `unmatched` and `error`. Re-running a partial
 sync is safe because both libraries are fetched before computing additions.
 
 OAuth access/refresh token JSON files are stored under the user's home directory.
-Restrict access to that directory. Never commit tokens or \`config.json\`.
+Restrict access to that directory. Never commit tokens or `config.json`.
 
-## Unit and acceptance tests
+## Testing and CI
 
-Two **independent GitHub Actions jobs** run on every pull request and pushes to \`main\`.
-No GitHub secrets, real Spotify/TIDAL accounts, or Docker are required.
+On every pull request and push to `main`, the workflow runs four independently
+reported jobs. These checks use .NET 10 and require no real Spotify or TIDAL accounts,
+developer credentials, GitHub secrets or Docker.
 
-| Job | Command | Coverage |
-| --- | --- | --- |
-| \`unit-tests\` | \`dotnet run --project tests/UnitTests/UnitTests.csproj -c Release\` | Normalization, exact matching, mismatches, missing ISRCs, ambiguous results, CSV escaping |
-| \`acceptance-tests\` | \`dotnet run --project tests/AcceptanceTests/AcceptanceTests.csproj -c Release\` | Simulated Spotify and TIDAL JSON/HTTP API, OAuth bearer headers, dry-run, both-way writes, one-way scope, idempotence, never-delete behavior, ambiguity handling |
+| Job | What it verifies |
+| --- | --- |
+| `unit-tests` | xUnit tests for recording matching, CSV escaping, error handling, cancellation, duplicates, and additive sync |
+| `acceptance-tests` | xUnit tests exercising the real HTTP adapters, CLI, OAuth PKCE/refresh, pagination, throttling, one-way and bidirectional workflows against deterministic fake HTTP services |
+| `coverage` | Coverlet merges unit **and** acceptance coverage and fails unless **line, branch and method coverage are each 100%** across all hand-authored application source |
+| `native-aot` | Publishes a Linux x64 Native AOT executable with `TreatWarningsAsErrors=true` |
 
-The acceptance suite injects a fake \`HttpMessageHandler\` into the **actual**
-\`SpotifyLibrary\` and \`TidalLibrary\` adapters. It exercises the real API
-request paths, verbs, response deserialization and synchronization engine.
-Mocked endpoints return deterministic catalogs; they do not require live web
-access. Docker would add complexity without improving coverage for this
-credential-free test layer.
+Run the xUnit suites locally with:
 
-All test projects intentionally use the .NET SDK alone (no external NuGet
-test dependencies). A test case throws when it fails, and each suite returns
-exit code 1 on failure, causing GitHub Actions to mark the job red.
+```sh
+dotnet test tests/UnitTests/UnitTests.csproj -c Release
+dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release
+```
 
-## PR verification
+The acceptance suite injects an `HttpMessageHandler` into the actual
+Spotify and TIDAL adapters. All HTTP responses and requests in application code and
+test fixtures use concrete DTO types and `System.Text.Json` source-generated
+metadata from `AppJsonContext`. No reflection-based JSON serialization is used.
+The compiler-generated `AppJsonContext` implementation is excluded from coverage
+because its branches are produced by Microsoft's generator, not by this project.
+All hand-written application logic remains within the 100% coverage threshold.
 
-Open a pull request targeting \`main\`; **CI** starts two distinct required-to-pass
-jobs: \`unit-tests\` and \`acceptance-tests\`. Review both check results under
-the pull request **Checks** tab. If desired, use GitHub branch protection/rulesets
-to require the two checks before merging.
+### Pull request requirements
+
+Under GitHub's repository ruleset, require the exact status names:
+`unit-tests`, `acceptance-tests`, `coverage`, and `native-aot`.
+The ruleset's required-status-check list must actually contain those names;
+simply running the checks is not sufficient to prevent merging failed checks.
+Review results on each pull request's **Checks** tab.
 
 ## Publish
 
-\`\`\`sh
+```sh
 dotnet publish -c Release -r win-x64 --self-contained true
 dotnet publish -c Release -r osx-x64 --self-contained true
 dotnet publish -c Release -r osx-arm64 --self-contained true
-\`\`\`
+```
 
 Native AOT compilation requires platform-specific tools, and macOS AOT builds
 must run on macOS. For a standard self-contained build without AOT add
-\`-p:PublishAot=false\`.
+`-p:PublishAot=false`.
 
 ## Known limitations / API validation
 
