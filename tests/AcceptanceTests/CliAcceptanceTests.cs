@@ -118,4 +118,17 @@ public sealed class CliAcceptanceTests
         await File.WriteAllTextAsync(Path.Combine(path, "config.json"), "{ invalid");
         Assert.Equal(1, await Program.Run(["sync"], path));
     }
+    [Fact]
+    public async Task Http_write_failure_produces_a_report_and_nonzero_exit_code()
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path);
+        var fake = new FakeMusicApi { RejectTidalWrites = true };
+        using var http = new HttpClient(fake);
+        Assert.Equal(1, await Program.Run(["sync", "--direction", "spotify-to-tidal"], path, http));
+        var report = await File.ReadAllTextAsync(Path.Combine(path, "report.csv"));
+        Assert.Contains("write denied", report);
+        Assert.Contains("error", report);
+    }
+
 }
