@@ -257,4 +257,116 @@ public sealed class HttpAdapterTests
         h.Push(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("null") });
         await Assert.ThrowsAsync<JsonException>(() => Spotify(h).GetFavorites());
     }
+    [Fact]
+    public async Task Default_retry_delay_is_used_when_no_delegate_is_provided()
+    {
+        var h = new ScriptedHandler();
+        var retry = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        retry.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.Zero);
+        h.Push(retry);
+        h.Push(Response(new SpotifySavedTracksPage(), AppJsonContext.Default.SpotifySavedTracksPage));
+        Assert.Empty(await Spotify(h).GetFavorites());
+        Assert.Equal(2, h.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Spotify_track_metadata_may_omit_title_artist_and_external_ids()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new SpotifySavedTracksPage {
+            Items = [new SpotifySavedItem { Track = new SpotifyTrackDto {
+                Id = "minimal", Name = null, Artists = [new SpotifyArtistDto { Name = null }],
+                ExternalIds = null } }]
+        }, AppJsonContext.Default.SpotifySavedTracksPage));
+        var track = Assert.Single(await Spotify(h).GetFavorites());
+        Assert.Equal("", track.Title);
+        Assert.Equal("", track.Artist);
+        Assert.Null(track.Isrc);
+    }
+
+    [Fact]
+    public async Task Tidal_missing_track_data_and_links_are_safe()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new TidalCollectionPage {
+            Data = [new TidalResourceDto { Id = "track-1" }], Links = null
+        }, AppJsonContext.Default.TidalCollectionPage));
+        h.Push(Response(new TidalTrackDetail { Data = null }, AppJsonContext.Default.TidalTrackDetail));
+        Assert.Empty(await Tidal(h).GetFavorites());
+        Assert.Equal(2, h.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Tidal_artist_matching_rejects_wrong_type_and_unrelated_artist_ids()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new TidalTrackPage {
+            Data = [TidalTrack("first", artistFallback:"fallback")],
+            Included = [
+                new TidalArtistDto { Id = "artist", Type = "label",
+                    Attributes = new TidalArtistAttributesDto { Name = "Incorrect type" } },
+                new TidalArtistDto { Id = "unrelated", Type = "artists",
+                    Attributes = new TidalArtistAttributesDto { Name = "Incorrect id" } }
+            ]
+        }, AppJsonContext.Default.TidalTrackPage));
+        var song = Assert.Single(await Tidal(h).SearchIsrc("USAAA0000001"));
+        Assert.Equal("fallback", song.Artist);
+    }
+
+    [Fact]
+    public async Task Tidal_artist_relationship_can_be_null_even_if_relationships_exist()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new TidalTrackPage {
+            Data = [new TidalTrackDto {
+                Id = "track", Relationships = new TidalRelationshipsDto { Artists = null },
+                Attributes = new TidalTrackAttributesDto {
+                    Title = "Song", Isrc = "USAAA0000001", Artist = "Local metadata" }
+            } ]
+        }, AppJsonContext.Default.TidalTrackPage));
+        var song = Assert.Single(await Tidal(h).SearchIsrc("USAAA0000001"));
+        Assert.Equal("Local metadata", song.Artist);
+    }
+
+    [Fact]
+    public async Task Tidal_matched_artist_without_attributes_falls_back_to_track_artist()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new TidalTrackPage {
+            Data = [TidalTrack("track", artistFallback:"Fallback")],
+            Included = [new TidalArtistDto { Id="artist", Type="artists", Attributes=null }]
+        }, AppJsonContext.Default.TidalTrackPage));
+        var song = Assert.Single(await Tidal(h).SearchIsrc("USAAA0000001"));
+        Assert.Equal("Fallback", song.Artist);
+    }
+
+    [Fact]
+    public async Task Tidal_track_without_attributes_produces_empty_metadata()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new TidalTrackPage {
+            Data = [new TidalTrackDto { Id = "track", Attributes = null, Relationships = null }]
+        }, AppJsonContext.Default.TidalTrackPage));
+        var songs = await Tidal(h).SearchIsrc("USAAA0000001");
+        Assert.Empty(songs);
+    }
+
+    [Fact]
+    public async Task Tidal_artist_relation_with_null_id_is_ignored()
+    {
+        var h = new ScriptedHandler();
+        h.Push(Response(new TidalTrackPage {
+            Data = [new TidalTrackDto {
+                Id="track", Attributes = new TidalTrackAttributesDto {
+                    Title="Song", Isrc="USAAA0000001", Artist="Fallback" },
+                Relationships = new TidalRelationshipsDto {
+                    Artists = new TidalArtistRelationshipDto {
+                        Data = [new TidalResourceDto { Id = null }] }
+                }
+            }],
+            Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackPage));
+        Assert.Equal("Fallback", Assert.Single(await Tidal(h).SearchIsrc("USAAA0000001")).Artist);
+    }
+
 }
