@@ -68,6 +68,12 @@ All hand-written application logic remains within the 100% coverage threshold.
 
 ### Pull request requirements
 
+The repository's branch ruleset may also require a completed CodeQL analysis.
+CodeQL is configured in the repository's **Settings → Advanced Security →
+Code scanning** and must report results for the pull request's current head
+commit before GitHub will permit merging.
+
+
 Under GitHub's repository ruleset, require the exact status names:
 `unit-tests`, `acceptance-tests`, `coverage`, and `native-aot`.
 The ruleset's required-status-check list must actually contain those names;
