@@ -7,32 +7,64 @@ permissions:
   contents: read
 jobs:
   unit-tests:
+    name: unit-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Run xUnit unit tests and enforce 100% coverage
-        run: >-
-          dotnet test tests/UnitTests/UnitTests.csproj -c Release
-          /p:CollectCoverage=true
-          /p:CoverletOutputFormat=cobertura
-          /p:Threshold=100
-          /p:ThresholdType=line%2cbranch%2cmethod
-          /p:ThresholdStat=total
+      - name: Run xUnit unit tests
+        run: dotnet test tests/UnitTests/UnitTests.csproj -c Release -p:TreatWarningsAsErrors=true
   acceptance-tests:
+    name: acceptance-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Run xUnit acceptance tests and enforce 100% coverage
-        run: >-
-          dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release
-          /p:CollectCoverage=true
-          /p:CoverletOutputFormat=cobertura
-          /p:Threshold=100
-          /p:ThresholdType=line%2cbranch%2cmethod
-          /p:ThresholdStat=total
+      - name: Run xUnit HTTP acceptance tests
+        run: dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release -p:TreatWarningsAsErrors=true
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      # Coverage is measured across BOTH test assemblies, not incorrectly
+      # against each suite in isolation. The threshold applies to all app code.
+      - name: Gather unit coverage
+        run: |
+          mkdir -p coverage
+          dotnet test tests/UnitTests/UnitTests.csproj -c Release \
+            /p:CollectCoverage=true \
+            /p:CoverletOutput="$(pwd)/coverage/" \
+            /p:CoverletOutputFormat=json
+      - name: Merge acceptance coverage and enforce 100% on all three metrics
+        run: |
+          dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release \
+            /p:CollectCoverage=true \
+            /p:MergeWith="$(pwd)/coverage/coverage.json" \
+            /p:CoverletOutput="$(pwd)/coverage/" \
+            /p:CoverletOutputFormat=json%2ccobertura \
+            /p:Threshold=100 \
+            /p:ThresholdType=line%2cbranch%2cmethod \
+            /p:ThresholdStat=total
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+  native-aot:
+    name: native-aot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish Native AOT without analyzer or trimming warnings
+        run: dotnet publish SpotifyToTidal.csproj -c Release -r linux-x64 --self-contained true -p:TreatWarningsAsErrors=true
