@@ -6,9 +6,17 @@ on:
 permissions:
   contents: read
 jobs:
-  unit-tests:
-    name: unit-tests
-    runs-on: ubuntu-latest
+  unit-tests-matrix:
+    name: unit-tests / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: macos-arm64, runner: macos-latest }
+          - { target: macos-x64, runner: macos-15-intel }
+          - { target: windows-x64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
@@ -16,16 +24,48 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Run xUnit unit tests
         run: dotnet test tests/UnitTests/UnitTests.csproj -c Release -p:TreatWarningsAsErrors=true
-  acceptance-tests:
-    name: acceptance-tests
+
+  unit-tests:
+    name: unit-tests
+    needs: unit-tests-matrix
+    if: always()
     runs-on: ubuntu-latest
+    steps:
+      - name: Require all unit-test platforms
+        env:
+          MATRIX_RESULT: ${{ needs.unit-tests-matrix.result }}
+        run: test "$MATRIX_RESULT" = "success"
+
+  acceptance-tests-matrix:
+    name: acceptance-tests / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: macos-arm64, runner: macos-latest }
+          - { target: macos-x64, runner: macos-15-intel }
+          - { target: windows-x64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - name: Run xUnit HTTP acceptance tests
+      - name: Run xUnit HTTP and CLI acceptance tests
         run: dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release -p:TreatWarningsAsErrors=true
+
+  acceptance-tests:
+    name: acceptance-tests
+    needs: acceptance-tests-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all acceptance-test platforms
+        env:
+          MATRIX_RESULT: ${{ needs.acceptance-tests-matrix.result }}
+        run: test "$MATRIX_RESULT" = "success"
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
@@ -109,13 +149,42 @@ jobs:
         with:
           name: coverage-report
           path: coverage/
-  native-aot:
-    name: native-aot
-    runs-on: ubuntu-latest
+  native-aot-matrix:
+    name: native-aot / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest, rid: linux-x64, binary: SpotifyToTidal }
+          - { target: macos-arm64, runner: macos-latest, rid: osx-arm64, binary: SpotifyToTidal }
+          - { target: macos-x64, runner: macos-15-intel, rid: osx-x64, binary: SpotifyToTidal }
+          - { target: windows-x64, runner: windows-latest, rid: win-x64, binary: SpotifyToTidal.exe }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - name: Publish Native AOT without analyzer or trimming warnings
-        run: dotnet publish SpotifyToTidal.csproj -c Release -r linux-x64 --self-contained true -p:TreatWarningsAsErrors=true
+      - name: Native AOT publish with warnings treated as errors
+        shell: pwsh
+        run: |
+          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:TreatWarningsAsErrors=true -o ./native-publish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke-test the compiled native executable
+        shell: pwsh
+        run: |
+          $binary = Join-Path (Resolve-Path ./native-publish).Path "${{ matrix.binary }}"
+          if (-not (Test-Path -LiteralPath $binary)) { throw "Missing published native executable: $binary" }
+          & $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  native-aot:
+    name: native-aot
+    needs: native-aot-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every native publish and smoke test
+        env:
+          MATRIX_RESULT: ${{ needs.native-aot-matrix.result }}
+        run: test "$MATRIX_RESULT" = "success"
