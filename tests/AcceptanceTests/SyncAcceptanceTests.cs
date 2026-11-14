@@ -60,7 +60,7 @@ sealed class FakeMusicApi : HttpMessageHandler
         var path = uri.AbsolutePath;
         var query = Uri.UnescapeDataString(uri.Query);
 
-        if (uri.Host == "spotify.test")
+        if (uri.Host is "spotify.test" or "api.spotify.com")
         {
             if (path == "/v1/me/tracks" && request.Method == HttpMethod.Get)
             {
@@ -93,7 +93,7 @@ sealed class FakeMusicApi : HttpMessageHandler
                 return Json(new EmptyApiResponse(), AppJsonContext.Default.EmptyApiResponse);
             }
         }
-        if (uri.Host == "tidal.test")
+        if (uri.Host is "tidal.test" or "openapi.tidal.com")
         {
             if (!request.Headers.Accept.Any(h => h.MediaType == "application/vnd.tidal.v1+json"))
                 throw new Exception("TIDAL media-type header absent");
