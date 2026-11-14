@@ -13,7 +13,15 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet run --project tests/UnitTests/UnitTests.csproj -c Release
+      - name: Run xUnit unit tests and enforce 100% coverage
+        run: >-
+          dotnet test tests/UnitTests/UnitTests.csproj -c Release
+          --collect:"XPlat Code Coverage"
+          /p:CollectCoverage=true
+          /p:CoverletOutputFormat=cobertura
+          /p:Threshold=100
+          /p:ThresholdType=line,branch,method
+          /p:ThresholdStat=total
   acceptance-tests:
     runs-on: ubuntu-latest
     steps:
@@ -21,4 +29,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet run --project tests/AcceptanceTests/AcceptanceTests.csproj -c Release
+      - name: Run xUnit acceptance tests and enforce 100% coverage
+        run: >-
+          dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release
+          /p:CollectCoverage=true
+          /p:CoverletOutputFormat=cobertura
+          /p:Threshold=100
+          /p:ThresholdType=line,branch,method
+          /p:ThresholdStat=total
