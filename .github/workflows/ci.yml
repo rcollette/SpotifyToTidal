@@ -53,6 +53,30 @@ jobs:
             /p:Threshold=100 \
             /p:ThresholdType=line%2cbranch%2cmethod \
             /p:ThresholdStat=total
+      - name: Diagnose uncovered source paths
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          reports = list(Path('coverage').rglob('*.cobertura.xml'))
+          if not reports:
+              print('No Cobertura report found')
+          for report in reports:
+              print(f'Coverage details: {report}')
+              root = ET.parse(report).getroot()
+              for package in root.findall('.//package'):
+                  for cls in package.findall('classes/class'):
+                      missing = [x.attrib.get('number') for x in cls.findall('lines/line')
+                                 if int(x.attrib.get('hits', '0')) == 0]
+                      partial = [x.attrib.get('number') for x in cls.findall('lines/line')
+                                 if x.attrib.get('branch') == 'True'
+                                 and not x.attrib.get('condition-coverage','').startswith('100%')]
+                      if missing or partial:
+                          print(f'{cls.attrib.get("filename")} :: {cls.attrib.get("name")}')
+                          print('  uncovered lines: ' + ', '.join(missing[:150]))
+                          print('  partial branches: ' + ', '.join(partial[:150]))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
