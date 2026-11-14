@@ -1,11 +1,12 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using SpotifyToTidal;
 using Xunit;
 
-// Black-box acceptance scenarios: real adapters + JSON + HTTP verbs + the sync engine,
-// with an in-memory HTTP server replacement. No personal accounts, credentials, or Docker.
+// HTTP-level acceptance tests use generated, strongly typed fixture contracts.
+// No credentials, reflection-based JSON, live API calls, or Docker are required.
 sealed class FakeMusicApi : HttpMessageHandler
 {
     public readonly HashSet<string> SpotifyFavorites = ["spot-A", "spot-B"];
@@ -25,24 +26,32 @@ sealed class FakeMusicApi : HttpMessageHandler
         ["tid-C"] = new("tid-C", "Ocean Blue", "Artist Three", "USAAA0000003")
     };
 
-    static object SpotifyTrack(Track t) => new
+    static SpotifyTrackDto SpotifyTrack(Track t) => new()
     {
-        id = t.Id, name = t.Title, artists = new[] { new { name = t.Artist } },
-        external_ids = new { isrc = t.Isrc }, is_local = false
+        Id = t.Id, Name = t.Title, Artists = [new SpotifyArtistDto { Name = t.Artist }],
+        ExternalIds = new SpotifyExternalIdsDto { Isrc = t.Isrc }
     };
-    static object TidalTrack(Track t) => new
+    static TidalTrackDto TidalTrack(Track t) => new()
     {
-        id = t.Id, type = "tracks", attributes = new { title = t.Title, isrc = t.Isrc },
-        relationships = new { artists = new { data = new[] {
-            new { id = "artist-" + t.Id, type = "artists" } } } }
+        Id = t.Id, Type = "tracks",
+        Attributes = new TidalTrackAttributesDto { Title = t.Title, Isrc = t.Isrc },
+        Relationships = new TidalRelationshipsDto
+        {
+            Artists = new TidalArtistRelationshipDto
+            {
+                Data = [new TidalResourceDto { Id = "artist-" + t.Id, Type = "artists" }]
+            }
+        }
     };
-    static object TidalArtist(Track t) => new
+    static TidalArtistDto TidalArtist(Track t) => new()
     {
-        id = "artist-" + t.Id, type = "artists", attributes = new { name = t.Artist }
+        Id = "artist-" + t.Id, Type = "artists",
+        Attributes = new TidalArtistAttributesDto { Name = t.Artist }
     };
-    static HttpResponseMessage Json(object payload) => new(HttpStatusCode.OK)
+    static HttpResponseMessage Json<T>(T payload, JsonTypeInfo<T> typeInfo) => new(HttpStatusCode.OK)
     {
-        Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
+        Content = new StringContent(JsonSerializer.Serialize(payload, typeInfo),
+            Encoding.UTF8, "application/json")
     };
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -56,26 +65,34 @@ sealed class FakeMusicApi : HttpMessageHandler
             if (path == "/v1/me/tracks" && request.Method == HttpMethod.Get)
             {
                 SpotifyReads++;
-                return Json(new { items = SpotifyFavorites.Select(id => new {
-                    track = SpotifyTrack(spotify[id])
-                }).ToArray(), next = (string?)null });
+                return Json(new SpotifySavedTracksPage
+                {
+                    Items = SpotifyFavorites.Select(id =>
+                        new SpotifySavedItem { Track = SpotifyTrack(spotify[id]) }).ToArray()
+                }, AppJsonContext.Default.SpotifySavedTracksPage);
             }
             if (path == "/v1/search" && request.Method == HttpMethod.Get)
             {
                 string isrc = spotify.Values.Select(t => t.Isrc).FirstOrDefault(isrc =>
                     isrc is not null && query.Contains(isrc, StringComparison.OrdinalIgnoreCase)) ?? "";
-                return Json(new { tracks = new { items = spotify.Values.Where(t => t.Isrc == isrc && isrc != "")
-                    .Select(SpotifyTrack).ToArray() } });
+                return Json(new SpotifySearchResponse
+                {
+                    Tracks = new SpotifyTrackPage
+                    {
+                        Items = spotify.Values.Where(t => t.Isrc == isrc && isrc != "")
+                            .Select(SpotifyTrack).ToArray()
+                    }
+                }, AppJsonContext.Default.SpotifySearchResponse);
             }
             if (path == "/v1/me/library" && request.Method == HttpMethod.Put)
             {
-                string target = spotify.Keys.FirstOrDefault(id => query.Contains("spotify:track:" + id)) ?? "";
+                string target = spotify.Keys.FirstOrDefault(id =>
+                    query.Contains("spotify:track:" + id)) ?? "";
                 if (target == "") throw new Exception("Unexpected Spotify PUT " + query);
                 SpotifyWrites++; SpotifyFavorites.Add(target);
-                return Json(new { });
+                return Json(new EmptyApiResponse(), AppJsonContext.Default.EmptyApiResponse);
             }
         }
-
         if (uri.Host == "tidal.test")
         {
             if (!request.Headers.Accept.Any(h => h.MediaType == "application/vnd.tidal.v1+json"))
@@ -83,14 +100,21 @@ sealed class FakeMusicApi : HttpMessageHandler
             if (path == "/v2/userCollectionTracks/me/relationships/items" && request.Method == HttpMethod.Get)
             {
                 TidalReads++;
-                return Json(new { data = TidalFavorites.Select(id => new { id, type = "tracks" }).ToArray(),
-                    links = new { next = (string?)null } });
+                return Json(new TidalCollectionPage
+                {
+                    Data = TidalFavorites.Select(id =>
+                        new TidalResourceDto { Id = id, Type = "tracks" }).ToArray(),
+                    Links = new TidalLinksDto()
+                }, AppJsonContext.Default.TidalCollectionPage);
             }
             if (path.StartsWith("/v2/tracks/") && request.Method == HttpMethod.Get)
             {
                 var id = Uri.UnescapeDataString(path["/v2/tracks/".Length..]);
                 var track = tidal[id];
-                return Json(new { data = TidalTrack(track), included = new[] { TidalArtist(track) } });
+                return Json(new TidalTrackDetail
+                {
+                    Data = TidalTrack(track), Included = [TidalArtist(track)]
+                }, AppJsonContext.Default.TidalTrackDetail);
             }
             if (path == "/v2/tracks" && request.Method == HttpMethod.Get)
             {
@@ -98,31 +122,31 @@ sealed class FakeMusicApi : HttpMessageHandler
                     isrc is not null && query.Contains(isrc, StringComparison.OrdinalIgnoreCase)) ?? "";
                 var matches = tidal.Values.Where(t => t.Isrc == isrc && isrc != "" &&
                     (AmbiguousTidalSearch || t.Id != "tid-A-copy")).ToArray();
-                return Json(new { data = matches.Select(TidalTrack).ToArray(),
-                    included = matches.Select(TidalArtist).ToArray(),
-                    links = new { next = (string?)null } });
+                return Json(new TidalTrackPage
+                {
+                    Data = matches.Select(TidalTrack).ToArray(),
+                    Included = matches.Select(TidalArtist).ToArray(),
+                    Links = new TidalLinksDto()
+                }, AppJsonContext.Default.TidalTrackPage);
             }
             if (path == "/v2/userCollectionTracks/me/relationships/items" && request.Method == HttpMethod.Post)
             {
-                using var content = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
-                string id = content.RootElement.GetProperty("data")[0].GetProperty("id").GetString()!;
+                var body = await request.Content!.ReadAsStringAsync(ct);
+                var content = JsonSerializer.Deserialize(body, AppJsonContext.Default.TidalCollectionWriteRequest)
+                    ?? throw new Exception("No collection request");
+                string id = content.Data[0].Id!;
                 if (!tidal.ContainsKey(id)) throw new Exception("Unknown TIDAL favorite ID");
                 TidalWrites++; TidalFavorites.Add(id);
-                return Json(new { data = new { } });
+                return Json(new EmptyApiResponse(), AppJsonContext.Default.EmptyApiResponse);
             }
         }
-
         throw new Exception("Unexpected request: " + request.Method + " " + uri);
     }
 }
 
-public class AcceptanceTests
+public class SyncAcceptanceTests
 {
-    static void Assert(bool condition, string reason = "Acceptance assertion failed")
-    {
-        if (!condition) throw new Exception(reason);
-    }
-    static (SpotifyLibrary Spotify, TidalLibrary Tidal, HttpClient Client) Setup(FakeMusicApi fake)
+    private static (SpotifyLibrary Spotify, TidalLibrary Tidal, HttpClient Client) Setup(FakeMusicApi fake)
     {
         var http = new HttpClient(fake);
         Func<Task<string>> token = () => Task.FromResult("test-bearer");
@@ -131,90 +155,98 @@ public class AcceptanceTests
     }
 
     [Fact]
-    public async Task Bidirectional_http_acceptance_scenarios()
+    public async Task Dry_run_previews_both_additions_and_never_writes()
     {
-        async Task Check(string name, Func<Task> test) => await test();
-        await Check("bidirectional dry-run previews both additions, never writes", async () =>
+        var fake = new FakeMusicApi();
+        var (spotify, tidal, http) = Setup(fake);
+        using (http)
         {
-            var fake = new FakeMusicApi();
-            var (spotify, tidal, http) = Setup(fake);
-            using (http)
-            {
-                var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.Both, dryRun: true);
-                Assert(rows.Count(r => r.Status == "would-add") == 2, "Expected two preview additions");
-                Assert(rows.Count(r => r.Status == "unmatched") == 1, "Expected missing-ISRC review");
-                Assert(fake.SpotifyWrites == 0 && fake.TidalWrites == 0);
-                Assert(fake.SpotifyReads > 0 && fake.TidalReads > 0);
-                Assert(CsvReport.Serialize(rows).Contains("spotify-to-tidal"));
-                Assert(CsvReport.Serialize(rows).Contains("tidal-to-spotify"));
-            }
-        });
+            var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.Both, dryRun: true);
+            Assert.Equal(2, rows.Count(r => r.Status == "would-add"));
+            Assert.Single(rows, r => r.Status == "unmatched");
+            Assert.Equal(0, fake.SpotifyWrites);
+            Assert.Equal(0, fake.TidalWrites);
+            Assert.True(fake.SpotifyReads > 0 && fake.TidalReads > 0);
+            Assert.Contains("spotify-to-tidal", CsvReport.Serialize(rows));
+            Assert.Contains("tidal-to-spotify", CsvReport.Serialize(rows));
+        }
+    }
 
-        await Check("live sync adds both ways, is idempotent, and never deletes", async () =>
+    [Fact]
+    public async Task Live_sync_is_additive_idempotent_and_never_removes()
+    {
+        var fake = new FakeMusicApi();
+        var (spotify, tidal, http) = Setup(fake);
+        using (http)
         {
-            var fake = new FakeMusicApi();
-            var (spotify, tidal, http) = Setup(fake);
-            using (http)
-            {
-                var first = await SyncEngine.Run(spotify, tidal, SyncDirection.Both, false);
-                Assert(first.Count(r => r.Status == "added") == 2);
-                Assert(fake.TidalFavorites.Contains("tid-A") && fake.SpotifyFavorites.Contains("spot-C"));
-                Assert(fake.SpotifyWrites == 1 && fake.TidalWrites == 1);
-                var second = await SyncEngine.Run(spotify, tidal, SyncDirection.Both, false);
-                Assert(second.All(r => r.Status != "added"));
-                Assert(fake.SpotifyWrites == 1 && fake.TidalWrites == 1);
-                Assert(fake.SpotifyFavorites.Contains("spot-B"), "Existing favorite must never be removed");
-            }
-        });
+            var first = await SyncEngine.Run(spotify, tidal, SyncDirection.Both, false);
+            Assert.Equal(2, first.Count(r => r.Status == "added"));
+            Assert.Contains("tid-A", fake.TidalFavorites);
+            Assert.Contains("spot-C", fake.SpotifyFavorites);
+            Assert.Equal(1, fake.SpotifyWrites);
+            Assert.Equal(1, fake.TidalWrites);
+            var second = await SyncEngine.Run(spotify, tidal, SyncDirection.Both, false);
+            Assert.DoesNotContain(second, r => r.Status == "added");
+            Assert.Equal(1, fake.SpotifyWrites);
+            Assert.Equal(1, fake.TidalWrites);
+            Assert.Contains("spot-B", fake.SpotifyFavorites);
+        }
+    }
 
-        await Check("one-way Spotify to TIDAL does not write Spotify", async () =>
+    [Fact]
+    public async Task Spotify_to_Tidal_does_not_write_Spotify()
+    {
+        var fake = new FakeMusicApi();
+        var (spotify, tidal, http) = Setup(fake);
+        using (http)
         {
-            var fake = new FakeMusicApi();
-            var (spotify, tidal, http) = Setup(fake);
-            using (http)
-            {
-                var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
-                Assert(rows.All(r => r.Direction == "spotify-to-tidal"));
-                Assert(fake.TidalWrites == 1 && fake.SpotifyWrites == 0);
-            }
-        });
+            var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
+            Assert.All(rows, r => Assert.Equal("spotify-to-tidal", r.Direction));
+            Assert.Equal(1, fake.TidalWrites);
+            Assert.Equal(0, fake.SpotifyWrites);
+        }
+    }
 
-        await Check("one-way TIDAL to Spotify does not write TIDAL", async () =>
+    [Fact]
+    public async Task Tidal_to_Spotify_does_not_write_Tidal()
+    {
+        var fake = new FakeMusicApi();
+        var (spotify, tidal, http) = Setup(fake);
+        using (http)
         {
-            var fake = new FakeMusicApi();
-            var (spotify, tidal, http) = Setup(fake);
-            using (http)
-            {
-                var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.TidalToSpotify, false);
-                Assert(rows.All(r => r.Direction == "tidal-to-spotify"));
-                Assert(fake.SpotifyWrites == 1 && fake.TidalWrites == 0);
-            }
-        });
+            var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.TidalToSpotify, false);
+            Assert.All(rows, r => Assert.Equal("tidal-to-spotify", r.Direction));
+            Assert.Equal(1, fake.SpotifyWrites);
+            Assert.Equal(0, fake.TidalWrites);
+        }
+    }
 
-        await Check("ambiguous destination candidates are never automatically liked", async () =>
+    [Fact]
+    public async Task Ambiguous_Tidal_candidates_are_never_added()
+    {
+        var fake = new FakeMusicApi { AmbiguousTidalSearch = true };
+        var (spotify, tidal, http) = Setup(fake);
+        using (http)
         {
-            var fake = new FakeMusicApi { AmbiguousTidalSearch = true };
-            var (spotify, tidal, http) = Setup(fake);
-            using (http)
-            {
-                var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
-                Assert(rows.Any(r => r.Status == "unmatched" && r.Note.Contains("Multiple")));
-                Assert(fake.TidalWrites == 0);
-            }
-        });
+            var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
+            Assert.Contains(rows, r => r.Status == "unmatched" && r.Note.Contains("Multiple"));
+            Assert.Equal(0, fake.TidalWrites);
+        }
+    }
 
-        await Check("unknown-ISRC source does not cause an unsafe write", async () =>
+    [Fact]
+    public async Task Missing_ISRC_never_causes_a_write()
+    {
+        var fake = new FakeMusicApi();
+        fake.SpotifyFavorites.Remove("spot-A");
+        var (spotify, tidal, http) = Setup(fake);
+        using (http)
         {
-            var fake = new FakeMusicApi();
-            fake.SpotifyFavorites.Remove("spot-A");
-            var (spotify, tidal, http) = Setup(fake);
-            using (http)
-            {
-                var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
-                Assert(rows.Count == 1 && rows[0].Status == "unmatched");
-                Assert(fake.SpotifyWrites == 0 && fake.TidalWrites == 0);
-            }
-        });
-
+            var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
+            Assert.Single(rows);
+            Assert.Equal("unmatched", rows[0].Status);
+            Assert.Equal(0, fake.SpotifyWrites);
+            Assert.Equal(0, fake.TidalWrites);
+        }
     }
 }
