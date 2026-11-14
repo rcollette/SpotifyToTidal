@@ -47,22 +47,16 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - name: Explicit SDK restore before native publish
-        shell: pwsh
-        run: |
-          dotnet --version
-          dotnet restore SpotifyToTidal.csproj -r "${{ matrix.rid }}" -p:TreatWarningsAsErrors=true --verbosity detailed
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Publish Native AOT with warnings as errors
         shell: pwsh
         run: |
-          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:TreatWarningsAsErrors=true
+          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:TreatWarningsAsErrors=true -o ./native-publish
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Smoke-test and package release
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dir = (Resolve-Path 'bin/Release/net10.0/${{ matrix.rid }}/publish').Path
+          $dir = (Resolve-Path ./native-publish).Path
           $bin = Join-Path $dir '${{ matrix.binary }}'
           if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) { throw "Executable missing: $bin" }
           & $bin
