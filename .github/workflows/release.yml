@@ -41,7 +41,7 @@ jobs:
           - { rid: osx-x64, runner: macos-15-intel, binary: SpotifyToTidal }
           - { rid: win-x64, runner: windows-latest, binary: SpotifyToTidal.exe }
     env:
-      VERSION: ${{ inputs.version || format('pr-{0}', github.event.pull_request.number) }}
+      RELEASE_LABEL: ${{ inputs.version || format('pr-{0}', github.event.pull_request.number) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
@@ -65,11 +65,11 @@ jobs:
           Copy-Item appsettings.example.json (Join-Path $dir 'appsettings.example.json')
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
           if ($IsWindows) {
-            $file = "SpotifyToTidal-$env:VERSION-${{ matrix.rid }}.zip"
+            $file = "SpotifyToTidal-$env:RELEASE_LABEL-${{ matrix.rid }}.zip"
             Compress-Archive -Path (Join-Path $dir '*') -DestinationPath (Join-Path release-assets $file) -CompressionLevel Optimal -Force
           } else {
             # tar preserves Unix execute permissions on extraction.
-            $file = "SpotifyToTidal-$env:VERSION-${{ matrix.rid }}.tar.gz"
+            $file = "SpotifyToTidal-$env:RELEASE_LABEL-${{ matrix.rid }}.tar.gz"
             & tar -czf (Join-Path release-assets $file) -C $dir .
             if ($LASTEXITCODE -ne 0) { throw 'tar packaging failed' }
           }
