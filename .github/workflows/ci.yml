@@ -16,7 +16,6 @@ jobs:
       - name: Run xUnit unit tests and enforce 100% coverage
         run: >-
           dotnet test tests/UnitTests/UnitTests.csproj -c Release
-          --collect:"XPlat Code Coverage"
           /p:CollectCoverage=true
           /p:CoverletOutputFormat=cobertura
           /p:Threshold=100
