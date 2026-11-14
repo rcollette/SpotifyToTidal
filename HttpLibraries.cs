@@ -7,7 +7,8 @@ using System.Text.Json.Serialization.Metadata;
 namespace SpotifyToTidal;
 
 public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> bearerToken,
-    Uri baseUrl, string acceptType) : ITrackLibrary
+    Uri baseUrl, string acceptType,
+    Func<TimeSpan, CancellationToken, Task>? retryDelay = null) : ITrackLibrary
 {
     protected readonly HttpClient Http = http;
     protected readonly Uri BaseUrl = baseUrl;
@@ -35,7 +36,7 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
                     throw new HttpRequestException($"{Name} returned {(int)response.StatusCode} after retries.");
                 var retry = response.Headers.RetryAfter?.Delta ??
                     TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
-                await Task.Delay(retry > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : retry, ct);
+                await (retryDelay ?? Task.Delay)(retry > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : retry, ct);
                 continue;
             }
             if (!response.IsSuccessStatusCode)
@@ -52,8 +53,9 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
     public abstract Task AddFavorite(string trackId, CancellationToken ct = default);
 }
 
-public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl)
-    : HttpTrackLibrary(http, token, baseUrl, "application/json")
+public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl,
+    Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
+    : HttpTrackLibrary(http, token, baseUrl, "application/json", retryDelay)
 {
     public override string Name => "Spotify";
 
@@ -108,8 +110,8 @@ public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Ur
 }
 
 public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl,
-    string countryCode = "US")
-    : HttpTrackLibrary(http, token, baseUrl, "application/vnd.tidal.v1+json")
+    string countryCode = "US", Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
+    : HttpTrackLibrary(http, token, baseUrl, "application/vnd.tidal.v1+json", retryDelay)
 {
     public override string Name => "TIDAL";
     readonly string country = countryCode;
