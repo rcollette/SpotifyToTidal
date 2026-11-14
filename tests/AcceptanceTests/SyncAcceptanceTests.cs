@@ -13,6 +13,7 @@ sealed class FakeMusicApi : HttpMessageHandler
     public readonly HashSet<string> TidalFavorites = ["tid-C"];
     public int SpotifyWrites, TidalWrites, SpotifyReads, TidalReads;
     public bool AmbiguousTidalSearch;
+    public bool RejectTidalWrites;
     readonly Dictionary<string, Track> spotify = new()
     {
         ["spot-A"] = new("spot-A", "North Star", "Artist One", "USAAA0000001"),
@@ -131,6 +132,10 @@ sealed class FakeMusicApi : HttpMessageHandler
             }
             if (path == "/v2/userCollectionTracks/me/relationships/items" && request.Method == HttpMethod.Post)
             {
+                if (RejectTidalWrites) return new HttpResponseMessage(HttpStatusCode.Forbidden)
+                {
+                    Content = new StringContent("write denied")
+                };
                 var body = await request.Content!.ReadAsStringAsync(ct);
                 var content = JsonSerializer.Deserialize(body, AppJsonContext.Default.TidalCollectionWriteRequest)
                     ?? throw new Exception("No collection request");
