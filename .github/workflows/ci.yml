@@ -19,7 +19,7 @@ jobs:
           /p:CollectCoverage=true
           /p:CoverletOutputFormat=cobertura
           /p:Threshold=100
-          /p:ThresholdType=line,branch,method
+          /p:ThresholdType=line%2cbranch%2cmethod
           /p:ThresholdStat=total
   acceptance-tests:
     runs-on: ubuntu-latest
@@ -34,5 +34,5 @@ jobs:
           /p:CollectCoverage=true
           /p:CoverletOutputFormat=cobertura
           /p:Threshold=100
-          /p:ThresholdType=line,branch,method
+          /p:ThresholdType=line%2cbranch%2cmethod
           /p:ThresholdStat=total
