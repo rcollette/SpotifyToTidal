@@ -43,7 +43,7 @@ jobs:
           dotnet test tests/UnitTests/UnitTests.csproj -c Release \
             /p:CollectCoverage=true \
             /p:CoverletOutput="$(pwd)/coverage/" \
-            /p:CoverletOutputFormat=json
+            /p:CoverletOutputFormat=json \
             /p:ExcludeByFile=**/obj/**
       - name: Merge acceptance coverage and enforce 100% on all three metrics
         run: |
