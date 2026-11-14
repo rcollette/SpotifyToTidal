@@ -51,8 +51,8 @@ jobs:
             /p:CollectCoverage=true \
             /p:MergeWith="$(pwd)/coverage/coverage.json" \
             /p:CoverletOutput="$(pwd)/coverage/" \
-            /p:CoverletOutputFormat=json
-            /p:ExcludeByFile=**/*.g.cs%2ccobertura \
+            /p:CoverletOutputFormat=json \
+            /p:ExcludeByFile="**/*.g.cs" \
             /p:Threshold=100 \
             /p:ThresholdType=line%2cbranch%2cmethod \
             /p:ThresholdStat=total
