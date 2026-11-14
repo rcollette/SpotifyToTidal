@@ -64,7 +64,31 @@ jobs:
           import xml.etree.ElementTree as ET
           reports = list(Path('coverage').rglob('*.cobertura.xml'))
           if not reports:
-              print('No Cobertura report found')
+              import json
+              raw = Path('coverage/coverage.json')
+              if raw.exists():
+                  data = json.loads(raw.read_text())
+                  for module, paths in data.items():
+                      for path, classes in paths.items():
+                          if '/obj/' in path: continue
+                          missing_lines, partial_branches = set(), set()
+                          missing_methods = []
+                          for cls, methods in classes.items():
+                              for name, result in methods.items():
+                                  lines = result.get('Lines', {})
+                                  uncovered = [int(ln) for ln, hits in lines.items() if not hits]
+                                  if lines and len(uncovered) == len(lines):
+                                      missing_methods.append(name)
+                                  missing_lines.update(uncovered)
+                                  partial_branches.update(int(b['Line']) for b in result.get('Branches', [])
+                                                          if not b.get('Hits', 0))
+                          if missing_lines or partial_branches:
+                              print(f'UNCOVERED {Path(path).name} ({module})')
+                              print('  lines: ' + ', '.join(map(str, sorted(missing_lines))))
+                              print('  branches: ' + ', '.join(map(str, sorted(partial_branches))))
+                              print('  methods: ' + ', '.join(missing_methods[:30]))
+              else:
+                  print('No coverage report found')
           for report in reports:
               print(f'Coverage details: {report}')
               root = ET.parse(report).getroot()
