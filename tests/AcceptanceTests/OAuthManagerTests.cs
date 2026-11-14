@@ -229,4 +229,73 @@ public sealed class OAuthManagerTests
         await Assert.ThrowsAsync<JsonException>(() =>
             manager.Login("spotify").WaitAsync(TimeSpan.FromSeconds(12)));
     }
+    [Fact]
+    public async Task Browser_launch_failure_does_not_prevent_loopback_authentication()
+    {
+        int port = FreeLoopbackPort();
+        var settings = Settings(port);
+        var server = new FakeTokenServer();
+        using var http = new HttpClient(server);
+        Task? callback = null;
+        var manager = new OAuthManager(TemporaryPath(), settings, http, url =>
+        {
+            var state = QueryValue(new Uri(url), "state");
+            callback = Task.Run(async () =>
+            {
+                using var callbackHttp = new HttpClient();
+                using var response = await callbackHttp.GetAsync(
+                    settings.SpotifyRedirectUri + "?state=" + state + "&code=code");
+                response.EnsureSuccessStatusCode();
+            });
+            throw new InvalidOperationException("Browser launcher unavailable");
+        });
+        await manager.Login("spotify").WaitAsync(TimeSpan.FromSeconds(12));
+        Assert.NotNull(callback);
+        await callback.WaitAsync(TimeSpan.FromSeconds(12));
+        Assert.Equal(1, server.Calls);
+    }
+
+    [Fact]
+    public async Task Null_OAuth_token_JSON_is_rejected()
+    {
+        int port = FreeLoopbackPort();
+        var settings = Settings(port);
+        var server = new FakeTokenServer { Body = "null" };
+        using var http = new HttpClient(server);
+        var manager = new OAuthManager(TemporaryPath(), settings, http, url =>
+        {
+            var state = QueryValue(new Uri(url), "state");
+            _ = Task.Run(async () =>
+            {
+                using var callbackHttp = new HttpClient();
+                await callbackHttp.GetAsync(settings.SpotifyRedirectUri + "?state=" + state + "&code=code");
+            });
+        });
+        await Assert.ThrowsAsync<JsonException>(() =>
+            manager.Login("spotify").WaitAsync(TimeSpan.FromSeconds(12)));
+    }
+
+    [Fact]
+    public async Task Refresh_without_a_new_refresh_token_preserves_old_token()
+    {
+        string path = TemporaryPath();
+        Directory.CreateDirectory(path);
+        await File.WriteAllTextAsync(Path.Combine(path, "spotify-token.json"),
+            JsonSerializer.Serialize(new OAuthToken("expired", "original-refresh",
+                DateTimeOffset.UtcNow.AddMinutes(-2)), AppJsonContext.Default.OAuthToken));
+        var server = new FakeTokenServer
+        {
+            Body = JsonSerializer.Serialize(new OAuthTokenResponse
+            {
+                AccessToken = "updated", RefreshToken = null, ExpiresIn = 10
+            }, AppJsonContext.Default.OAuthTokenResponse)
+        };
+        using var http = new HttpClient(server);
+        Assert.Equal("updated", await new OAuthManager(path, Settings(), http).AccessToken("spotify"));
+        var token = JsonSerializer.Deserialize(await File.ReadAllTextAsync(
+            Path.Combine(path, "spotify-token.json")), AppJsonContext.Default.OAuthToken);
+        Assert.Equal("original-refresh", token?.RefreshToken);
+        Assert.True(token?.ExpiresAt > DateTimeOffset.UtcNow);
+    }
+
 }
