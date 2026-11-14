@@ -115,6 +115,8 @@ public sealed class TidalCollectionWriteRequest
     [JsonPropertyName("data")] public TidalResourceDto[] Data { get; init; } = [];
 }
 
+public sealed class EmptyApiResponse;
+
 public sealed class OAuthTokenResponse
 {
     [JsonPropertyName("access_token")] public string AccessToken { get; init; } = "";
@@ -136,4 +138,5 @@ public sealed class OAuthTokenResponse
 [JsonSerializable(typeof(TidalTrackPage))]
 [JsonSerializable(typeof(TidalTrackDetail))]
 [JsonSerializable(typeof(TidalCollectionWriteRequest))]
+[JsonSerializable(typeof(EmptyApiResponse))]
 public partial class AppJsonContext : JsonSerializerContext;
