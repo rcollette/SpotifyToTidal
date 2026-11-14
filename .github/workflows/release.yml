@@ -64,13 +64,20 @@ jobs:
           Copy-Item README.md (Join-Path $dir 'README.md')
           Copy-Item appsettings.example.json (Join-Path $dir 'appsettings.example.json')
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
-          $file = "SpotifyToTidal-$env:VERSION-${{ matrix.rid }}.zip"
-          Compress-Archive -Path (Join-Path $dir '*') -DestinationPath (Join-Path release-assets $file) -CompressionLevel Optimal -Force
+          if ($IsWindows) {
+            $file = "SpotifyToTidal-$env:VERSION-${{ matrix.rid }}.zip"
+            Compress-Archive -Path (Join-Path $dir '*') -DestinationPath (Join-Path release-assets $file) -CompressionLevel Optimal -Force
+          } else {
+            # tar preserves Unix execute permissions on extraction.
+            $file = "SpotifyToTidal-$env:VERSION-${{ matrix.rid }}.tar.gz"
+            & tar -czf (Join-Path release-assets $file) -C $dir .
+            if ($LASTEXITCODE -ne 0) { throw 'tar packaging failed' }
+          }
           if (-not (Test-Path (Join-Path release-assets $file))) { throw 'Archive missing' }
       - uses: actions/upload-artifact@v7
         with:
           name: release-package-${{ matrix.rid }}
-          path: release-assets/*.zip
+          path: release-assets/*
           if-no-files-found: error
           retention-days: 14
   publish:
@@ -91,7 +98,7 @@ jobs:
           merge-multiple: true
       - name: Verify archives
         run: |
-          test "$(find release-assets -maxdepth 1 -type f -name '*.zip' | wc -l)" -eq 4
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
       - name: Create tag, release and download assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,7 +110,7 @@ jobs:
             exit 1
           fi
           if [[ "$PRERELEASE" == "true" ]]; then
-            gh release create "$VERSION" release-assets/*.zip --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes --prerelease
+            gh release create "$VERSION" release-assets/* --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes --prerelease
           else
             gh release create "$VERSION" release-assets/*.zip --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes
           fi
