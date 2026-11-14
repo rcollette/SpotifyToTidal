@@ -1,19 +1,16 @@
 using SpotifyToTidal;
+using Xunit;
 
-static class Tests
+public class TrackUnitTests
 {
-    static int passed, failed;
     static void Assert(bool value, string message = "Assertion failed")
     {
         if (!value) throw new Exception(message);
     }
-    static void Check(string name, Action test)
+    [Fact]
+    public void Track_matching_and_CSV_cases()
     {
-        try { test(); passed++; Console.WriteLine("PASS " + name); }
-        catch (Exception ex) { failed++; Console.Error.WriteLine("FAIL " + name + ": " + ex); }
-    }
-    public static int Main()
-    {
+        void Check(string name, Action test) => test();
         Track a = new("spotify-1", "A Song (Live)", "Beyoncé", "USAAA0000001");
         Check("normalization handles case, punctuation and accents", () =>
             Assert(TrackMatcher.Normalize("  BéYoncé! ") == "beyonce"));
@@ -65,7 +62,6 @@ static class Tests
             var candidate = a with { Id = "tidal-case", Isrc = "usaaa0000001", Title = "A SONG (LIVE)" };
             Assert(TrackMatcher.UniqueMatch(a, new[] { candidate }).Match?.Id == candidate.Id);
         });
-        Console.WriteLine($"Unit tests: {passed} passed, {failed} failed");
-        return failed == 0 ? 0 : 1;
+
     }
 }
