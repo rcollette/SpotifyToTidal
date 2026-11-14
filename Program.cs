@@ -110,13 +110,17 @@ public static class Program
     static void Help() => Console.WriteLine(
         "Commands:\n  login spotify|tidal\n  sync [--dry-run] [--direction both|spotify-to-tidal|tidal-to-spotify]\n  report");
 
-    public static async Task<int> Main(string[] args)
+    public static Task<int> Main(string[] args) =>
+        Run(args, Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spotify-to-tidal"));
+
+    // An injectable HTTP transport and token directory make the real CLI testable
+    // without external services, global HOME changes, or OAuth credentials.
+    public static async Task<int> Run(string[] args, string dataDir, HttpClient? providedHttp = null)
     {
         try
         {
             if (args.Length == 0) { Help(); return 0; }
-            string dataDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spotify-to-tidal");
             Directory.CreateDirectory(dataDir);
             if (args[0] == "report")
             {
@@ -127,7 +131,8 @@ public static class Program
                 throw new InvalidOperationException("Copy appsettings.example.json to " + configPath + " and configure client IDs.");
             var settings = JsonSerializer.Deserialize(await File.ReadAllTextAsync(configPath), AppJsonContext.Default.AppSettings)
                 ?? throw new JsonException("Config JSON was null.");
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(40) };
+            using var ownedHttp = providedHttp is null ? new HttpClient { Timeout = TimeSpan.FromSeconds(40) } : null;
+            var http = providedHttp ?? ownedHttp!;
             var auth = new OAuthManager(dataDir, settings, http);
             if (args[0] == "login" && args.Length == 2 && args[1] is "spotify" or "tidal")
             {
