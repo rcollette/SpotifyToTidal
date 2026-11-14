@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using SpotifyToTidal;
+using Xunit;
 
 // Black-box acceptance scenarios: real adapters + JSON + HTTP verbs + the sync engine,
 // with an in-memory HTTP server replacement. No personal accounts, credentials, or Docker.
@@ -115,17 +116,11 @@ sealed class FakeMusicApi : HttpMessageHandler
     }
 }
 
-static class AcceptanceTests
+public class AcceptanceTests
 {
-    static int passed, failed;
     static void Assert(bool condition, string reason = "Acceptance assertion failed")
     {
         if (!condition) throw new Exception(reason);
-    }
-    static async Task Check(string name, Func<Task> test)
-    {
-        try { await test(); passed++; Console.WriteLine("PASS " + name); }
-        catch (Exception ex) { failed++; Console.Error.WriteLine("FAIL " + name + ": " + ex); }
     }
     static (SpotifyLibrary Spotify, TidalLibrary Tidal, HttpClient Client) Setup(FakeMusicApi fake)
     {
@@ -135,8 +130,10 @@ static class AcceptanceTests
             new TidalLibrary(http, token, new Uri("https://tidal.test/")), http);
     }
 
-    public static async Task<int> Main()
+    [Fact]
+    public async Task Bidirectional_http_acceptance_scenarios()
     {
+        async Task Check(string name, Func<Task> test) => await test();
         await Check("bidirectional dry-run previews both additions, never writes", async () =>
         {
             var fake = new FakeMusicApi();
@@ -218,7 +215,6 @@ static class AcceptanceTests
                 Assert(fake.SpotifyWrites == 0 && fake.TidalWrites == 0);
             }
         });
-        Console.WriteLine($"Acceptance tests: {passed} passed, {failed} failed");
-        return failed == 0 ? 0 : 1;
+
     }
 }
