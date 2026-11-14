@@ -115,7 +115,7 @@ public sealed class TidalCollectionWriteRequest
     [JsonPropertyName("data")] public TidalResourceDto[] Data { get; init; } = [];
 }
 
-public sealed class EmptyApiResponse;
+public sealed class EmptyApiResponse { }
 
 public sealed class OAuthTokenResponse
 {
