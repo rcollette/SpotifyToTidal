@@ -40,8 +40,8 @@ Restrict access to that directory. Never commit tokens or `config.json`.
 
 ## Testing and CI
 
-On every pull request and push to `main`, the workflow runs four independently
-reported jobs. These checks use .NET 10 and require no real Spotify or TIDAL accounts,
+On every pull request and push to `main`, CI runs a Linux/macOS/Windows test and
+Native AOT matrix, plus stable aggregate checks. These checks use .NET 10 and require no real Spotify or TIDAL accounts,
 developer credentials, GitHub secrets or Docker.
 
 | Job | What it verifies |
@@ -49,7 +49,7 @@ developer credentials, GitHub secrets or Docker.
 | `unit-tests` | xUnit tests for recording matching, CSV escaping, error handling, cancellation, duplicates, and additive sync |
 | `acceptance-tests` | xUnit tests exercising the real HTTP adapters, CLI, OAuth PKCE/refresh, pagination, throttling, one-way and bidirectional workflows against deterministic fake HTTP services |
 | `coverage` | Coverlet merges unit **and** acceptance coverage and fails unless **line, branch and method coverage are each 100%** across all hand-authored application source |
-| `native-aot` | Publishes a Linux x64 Native AOT executable with `TreatWarningsAsErrors=true` |
+| `native-aot` | Publishes and smoke-tests Native AOT executables across Linux, Windows, and both macOS architectures, with `TreatWarningsAsErrors=true` |
 
 Run the xUnit suites locally with:
 
@@ -73,6 +73,30 @@ Under GitHub's repository ruleset, require the exact status names:
 The ruleset's required-status-check list must actually contain those names;
 simply running the checks is not sufficient to prevent merging failed checks.
 Review results on each pull request's **Checks** tab.
+
+## GitHub releases
+
+Use **Actions → Release → Run workflow** after this PR has been merged to
+`main`. Select the `main` branch, provide a new semantic-version tag such as
+`v0.1.0`, and optionally mark the release as a prerelease.
+
+The manually triggered workflow publishes four native-AOT release downloads:
+
+| Release asset | Platform |
+| --- | --- |
+| `SpotifyToTidal-v0.1.0-linux-x64.zip` | Linux x86-64 |
+| `SpotifyToTidal-v0.1.0-osx-arm64.zip` | macOS Apple Silicon |
+| `SpotifyToTidal-v0.1.0-osx-x64.zip` | macOS Intel |
+| `SpotifyToTidal-v0.1.0-win-x64.zip` | Windows x86-64 |
+
+Each ZIP contains a native self-contained executable, configuration example, and
+README. All archives are built on their target OS and smoke-tested before GitHub
+creates the version tag and attaches the ZIP files to the public **Releases** page.
+No release is published on pull requests: those runs only verify the packaging and
+provide temporary CI artifacts. Version tags are immutable in this workflow—use a
+new version for each subsequent release. Both macOS archives are unsigned and
+not notarized; Windows binaries are unsigned. Operating-system security prompts
+may appear until signing is set up.
 
 ## Publish
 
