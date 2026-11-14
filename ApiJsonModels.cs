@@ -139,4 +139,5 @@ public sealed class OAuthTokenResponse
 [JsonSerializable(typeof(TidalTrackDetail))]
 [JsonSerializable(typeof(TidalCollectionWriteRequest))]
 [JsonSerializable(typeof(EmptyApiResponse))]
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage] // Entirely compiler-generated serializer implementation
 public partial class AppJsonContext : JsonSerializerContext;
