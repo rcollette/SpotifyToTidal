@@ -206,6 +206,18 @@ static class AcceptanceTests
             }
         });
 
+        await Check("unknown-ISRC source does not cause an unsafe write", async () =>
+        {
+            var fake = new FakeMusicApi();
+            fake.SpotifyFavorites.Remove("spot-A");
+            var (spotify, tidal, http) = Setup(fake);
+            using (http)
+            {
+                var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal, false);
+                Assert(rows.Count == 1 && rows[0].Status == "unmatched");
+                Assert(fake.SpotifyWrites == 0 && fake.TidalWrites == 0);
+            }
+        });
         Console.WriteLine($"Acceptance tests: {passed} passed, {failed} failed");
         return failed == 0 ? 0 : 1;
     }
