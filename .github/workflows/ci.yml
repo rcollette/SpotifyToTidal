@@ -6,19 +6,185 @@ on:
 permissions:
   contents: read
 jobs:
+  unit-tests-matrix:
+    name: unit-tests / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: macos-arm64, runner: macos-latest }
+          - { target: macos-x64, runner: macos-15-intel }
+          - { target: windows-x64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Run xUnit unit tests
+        run: dotnet test tests/UnitTests/UnitTests.csproj -c Release -p:TreatWarningsAsErrors=true
+
   unit-tests:
+    name: unit-tests
+    needs: unit-tests-matrix
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - name: Require all unit-test platforms
+        env:
+          MATRIX_RESULT: ${{ needs.unit-tests-matrix.result }}
+        run: test "$MATRIX_RESULT" = "success"
+
+  acceptance-tests-matrix:
+    name: acceptance-tests / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: macos-arm64, runner: macos-latest }
+          - { target: macos-x64, runner: macos-15-intel }
+          - { target: windows-x64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet run --project tests/UnitTests/UnitTests.csproj -c Release
+      - name: Run xUnit HTTP and CLI acceptance tests
+        run: dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release -p:TreatWarningsAsErrors=true
+
   acceptance-tests:
+    name: acceptance-tests
+    needs: acceptance-tests-matrix
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - name: Require all acceptance-test platforms
+        env:
+          MATRIX_RESULT: ${{ needs.acceptance-tests-matrix.result }}
+        run: test "$MATRIX_RESULT" = "success"
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet run --project tests/AcceptanceTests/AcceptanceTests.csproj -c Release
+      # Only generated *.g.cs sources are excluded; all handwritten production code is measured.
+      # Coverage is measured across BOTH test assemblies, not incorrectly
+      # against each suite in isolation. The threshold applies to all app code.
+      - name: Gather unit coverage
+        run: |
+          mkdir -p coverage
+          dotnet test tests/UnitTests/UnitTests.csproj -c Release \
+            /p:CollectCoverage=true \
+            /p:CoverletOutput="$(pwd)/coverage/" \
+            /p:CoverletOutputFormat=json \
+            /p:ExcludeByFile=**/*.g.cs
+      - name: Merge acceptance coverage and enforce 100% on all three metrics
+        run: |
+          dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release \
+            /p:CollectCoverage=true \
+            /p:MergeWith="$(pwd)/coverage/coverage.json" \
+            /p:CoverletOutput="$(pwd)/coverage/" \
+            /p:CoverletOutputFormat=json \
+            /p:ExcludeByFile="**/*.g.cs" \
+            /p:Threshold=100 \
+            /p:ThresholdType=line%2cbranch%2cmethod \
+            /p:ThresholdStat=total
+      - name: Diagnose uncovered source paths
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          reports = list(Path('coverage').rglob('*.cobertura.xml'))
+          if not reports:
+              import json
+              raw = Path('coverage/coverage.json')
+              if raw.exists():
+                  data = json.loads(raw.read_text())
+                  for module, paths in data.items():
+                      for path, classes in paths.items():
+                          if '/obj/' in path: continue
+                          missing_lines, partial_branches = set(), set()
+                          missing_methods = []
+                          for cls, methods in classes.items():
+                              for name, result in methods.items():
+                                  lines = result.get('Lines', {})
+                                  uncovered = [int(ln) for ln, hits in lines.items() if not hits]
+                                  if lines and len(uncovered) == len(lines):
+                                      missing_methods.append(name)
+                                  missing_lines.update(uncovered)
+                                  partial_branches.update(int(b['Line']) for b in result.get('Branches', [])
+                                                          if not b.get('Hits', 0))
+                          if missing_lines or partial_branches:
+                              print(f'UNCOVERED {Path(path).name} ({module})')
+                              print('  lines: ' + ', '.join(map(str, sorted(missing_lines))))
+                              print('  branches: ' + ', '.join(map(str, sorted(partial_branches))))
+                              print('  methods: ' + ', '.join(missing_methods[:30]))
+              else:
+                  print('No coverage report found')
+          for report in reports:
+              print(f'Coverage details: {report}')
+              root = ET.parse(report).getroot()
+              for package in root.findall('.//package'):
+                  for cls in package.findall('classes/class'):
+                      missing = [x.attrib.get('number') for x in cls.findall('lines/line')
+                                 if int(x.attrib.get('hits', '0')) == 0]
+                      partial = [x.attrib.get('number') for x in cls.findall('lines/line')
+                                 if x.attrib.get('branch') == 'True'
+                                 and not x.attrib.get('condition-coverage','').startswith('100%')]
+                      if missing or partial:
+                          print(f'{cls.attrib.get("filename")} :: {cls.attrib.get("name")}')
+                          print('  uncovered lines: ' + ', '.join(missing[:150]))
+                          print('  partial branches: ' + ', '.join(partial[:150]))
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+  native-aot-matrix:
+    name: native-aot / ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest, rid: linux-x64, binary: SpotifyToTidal }
+          - { target: macos-arm64, runner: macos-latest, rid: osx-arm64, binary: SpotifyToTidal }
+          - { target: macos-x64, runner: macos-15-intel, rid: osx-x64, binary: SpotifyToTidal }
+          - { target: windows-x64, runner: windows-latest, rid: win-x64, binary: SpotifyToTidal.exe }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Native AOT publish with warnings treated as errors
+        shell: pwsh
+        run: |
+          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:TreatWarningsAsErrors=true -o ./native-publish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke-test the compiled native executable
+        shell: pwsh
+        run: |
+          $binary = Join-Path (Resolve-Path ./native-publish).Path "${{ matrix.binary }}"
+          if (-not (Test-Path -LiteralPath $binary)) { throw "Missing published native executable: $binary" }
+          & $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  native-aot:
+    name: native-aot
+    needs: native-aot-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every native publish and smoke test
+        env:
+          MATRIX_RESULT: ${{ needs.native-aot-matrix.result }}
+        run: test "$MATRIX_RESULT" = "success"

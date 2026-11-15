@@ -12,9 +12,9 @@ public sealed record AppSettings(string SpotifyClientId, string TidalClientId,
 
 public sealed record OAuthToken(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt);
 
-public sealed class OAuthManager(string dataDirectory, AppSettings settings, HttpClient http)
+public sealed class OAuthManager(string dataDirectory, AppSettings settings, HttpClient http,
+    Action<string>? browserOpener = null)
 {
-    static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
     string TokenPath(string service) => Path.Combine(dataDirectory, service + "-token.json");
     string ClientId(string service) => service == "spotify" ? settings.SpotifyClientId : settings.TidalClientId;
     string Redirect(string service) => service == "spotify" ? settings.SpotifyRedirectUri : settings.TidalRedirectUri;
@@ -48,7 +48,11 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
             "&scope=" + Encode(Scopes(service)) + "&state=" + state +
             "&code_challenge_method=S256&code_challenge=" + challenge;
         Console.WriteLine("Open in your browser:\n" + url);
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+        try
+        {
+            if (browserOpener is null) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            else browserOpener(url);
+        }
         catch { /* URL printed for headless terminals. */ }
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var context = await listener.GetContextAsync().WaitAsync(cts.Token);
@@ -75,14 +79,14 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
         string body = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException($"{service} token request failed ({(int)response.StatusCode}): {body}");
-        using var doc = JsonDocument.Parse(body);
-        var root = doc.RootElement;
-        var token = new OAuthToken(root.GetProperty("access_token").GetString()!,
-            root.TryGetProperty("refresh_token", out var next) ? next.GetString() : refresh,
-            DateTimeOffset.UtcNow.AddSeconds(
-                root.TryGetProperty("expires_in", out var expires) ? Math.Max(10, expires.GetInt32() - 90) : 3500));
+        var result = JsonSerializer.Deserialize(body, AppJsonContext.Default.OAuthTokenResponse)
+            ?? throw new JsonException("OAuth token response was null.");
+        if (string.IsNullOrWhiteSpace(result.AccessToken))
+            throw new JsonException("OAuth token response omitted the access token.");
+        var token = new OAuthToken(result.AccessToken, result.RefreshToken ?? refresh,
+            DateTimeOffset.UtcNow.AddSeconds(Math.Max(10, result.ExpiresIn - 90)));
         Directory.CreateDirectory(dataDirectory);
-        await File.WriteAllTextAsync(TokenPath(service), JsonSerializer.Serialize(token, Json));
+        await File.WriteAllTextAsync(TokenPath(service), JsonSerializer.Serialize(token, AppJsonContext.Default.OAuthToken));
         return token;
     }
 
@@ -91,7 +95,7 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
         if (!File.Exists(TokenPath(service)))
             throw new InvalidOperationException("Run 'login " + service + "' first.");
         var token = JsonSerializer.Deserialize<OAuthToken>(
-            await File.ReadAllTextAsync(TokenPath(service)), Json)!;
+            await File.ReadAllTextAsync(TokenPath(service)), AppJsonContext.Default.OAuthToken)!;
         if (token.ExpiresAt <= DateTimeOffset.UtcNow)
         {
             if (token.RefreshToken is null)
@@ -108,17 +112,20 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
 
 public static class Program
 {
-    static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     static void Help() => Console.WriteLine(
         "Commands:\n  login spotify|tidal\n  sync [--dry-run] [--direction both|spotify-to-tidal|tidal-to-spotify]\n  report");
 
-    public static async Task<int> Main(string[] args)
+    public static Task<int> Main(string[] args) =>
+        Run(args, Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spotify-to-tidal"));
+
+    // An injectable HTTP transport and token directory make the real CLI testable
+    // without external services, global HOME changes, or OAuth credentials.
+    public static async Task<int> Run(string[] args, string dataDir, HttpClient? providedHttp = null)
     {
         try
         {
             if (args.Length == 0) { Help(); return 0; }
-            string dataDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spotify-to-tidal");
             Directory.CreateDirectory(dataDir);
             if (args[0] == "report")
             {
@@ -127,8 +134,10 @@ public static class Program
             string configPath = Path.Combine(dataDir, "config.json");
             if (!File.Exists(configPath))
                 throw new InvalidOperationException("Copy appsettings.example.json to " + configPath + " and configure client IDs.");
-            var settings = JsonSerializer.Deserialize<AppSettings>(await File.ReadAllTextAsync(configPath), Json)!;
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(40) };
+            var settings = JsonSerializer.Deserialize(await File.ReadAllTextAsync(configPath), AppJsonContext.Default.AppSettings)
+                ?? throw new JsonException("Config JSON was null.");
+            using var ownedHttp = providedHttp is null ? new HttpClient { Timeout = TimeSpan.FromSeconds(40) } : null;
+            var http = providedHttp ?? ownedHttp!;
             var auth = new OAuthManager(dataDir, settings, http);
             if (args[0] == "login" && args.Length == 2 && args[1] is "spotify" or "tidal")
             {

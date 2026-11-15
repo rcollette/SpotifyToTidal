@@ -1,0 +1,116 @@
+name: Release
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - global.json
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag (for example v0.1.0)
+        required: true
+        type: string
+      prerelease:
+        description: Publish as prerelease
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate manual release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main" || { echo '::error::Select main to release'; exit 1; }
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo '::error::Invalid release version'; exit 1; }
+  package:
+    name: Package / ${{ matrix.rid }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: linux-x64, runner: ubuntu-latest, binary: SpotifyToTidal }
+          - { rid: osx-arm64, runner: macos-latest, binary: SpotifyToTidal }
+          - { rid: osx-x64, runner: macos-15-intel, binary: SpotifyToTidal }
+          - { rid: win-x64, runner: windows-latest, binary: SpotifyToTidal.exe }
+    env:
+      RELEASE_LABEL: ${{ inputs.version || format('pr-{0}', github.event.pull_request.number) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish Native AOT with warnings as errors
+        shell: pwsh
+        run: |
+          dotnet publish SpotifyToTidal.csproj -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:TreatWarningsAsErrors=true -o ./native-publish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke-test and package release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = (Resolve-Path ./native-publish).Path
+          $bin = Join-Path $dir '${{ matrix.binary }}'
+          if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) { throw "Executable missing: $bin" }
+          & $bin
+          if ($LASTEXITCODE -ne 0) { throw "Smoke test failed" }
+          Copy-Item README.md (Join-Path $dir 'README.md')
+          Copy-Item appsettings.example.json (Join-Path $dir 'appsettings.example.json')
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          if ($IsWindows) {
+            $file = "SpotifyToTidal-$env:RELEASE_LABEL-${{ matrix.rid }}.zip"
+            Compress-Archive -Path (Join-Path $dir '*') -DestinationPath (Join-Path release-assets $file) -CompressionLevel Optimal -Force
+          } else {
+            # tar preserves Unix execute permissions on extraction.
+            $file = "SpotifyToTidal-$env:RELEASE_LABEL-${{ matrix.rid }}.tar.gz"
+            & tar -czf (Join-Path release-assets $file) -C $dir .
+            if ($LASTEXITCODE -ne 0) { throw 'tar packaging failed' }
+          }
+          if (-not (Test-Path (Join-Path release-assets $file))) { throw 'Archive missing' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-package-${{ matrix.rid }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    name: Publish GitHub release
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: [validate, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-package-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify archives
+        run: |
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+      - name: Create tag, release and download assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo '::error::Version tag exists already'
+            exit 1
+          fi
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release create "$VERSION" release-assets/* --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes --prerelease
+          else
+            gh release create "$VERSION" release-assets/*.zip --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes
+          fi
