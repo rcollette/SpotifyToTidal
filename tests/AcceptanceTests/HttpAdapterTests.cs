@@ -431,6 +431,25 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
+    public async Task Tidal_relative_cursor_without_leading_slash_still_uses_v2_root()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Links = new TidalLinksDto
+            {
+                Next = "userCollectionTracks/me/relationships/items?page%5Bcursor%5D=RELATIVE"
+            }
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(Response(new TidalCollectionPage(), AppJsonContext.Default.TidalCollectionPage));
+        Assert.Empty(await Tidal(handler).GetFavorites());
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.StartsWith("GET https://tidal.test/v2/userCollectionTracks/me/relationships/items?",
+            handler.Requests[1]);
+        Assert.Contains("RELATIVE", handler.Requests[1]);
+    }
+
+    [Fact]
     public async Task Tidal_absolute_cursor_link_uses_supplied_api_url()
     {
         var handler = new ScriptedHandler();
