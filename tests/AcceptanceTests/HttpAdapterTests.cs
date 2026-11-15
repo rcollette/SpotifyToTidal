@@ -172,6 +172,31 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
+    public async Task Tidal_get_sends_JSON_API_Accept_header()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(request =>
+        {
+            Assert.Equal("application/vnd.api+json", Assert.Single(request.Headers.Accept).ToString());
+            return Response(new TidalTrackPage(), AppJsonContext.Default.TidalTrackPage);
+        });
+        Assert.Empty(await Tidal(handler).SearchIsrc("USAAA0000001"));
+    }
+
+    [Fact]
+    public async Task Tidal_post_sends_JSON_API_media_type_without_charset()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(request =>
+        {
+            Assert.Equal("application/vnd.api+json", Assert.Single(request.Headers.Accept).ToString());
+            Assert.Equal("application/vnd.api+json", request.Content?.Headers.ContentType?.ToString());
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        });
+        await Tidal(handler).AddFavorite("tidal-track-id");
+    }
+
+    [Fact]
     public async Task Tidal_add_serializes_a_static_request_type()
     {
         var h = new ScriptedHandler();

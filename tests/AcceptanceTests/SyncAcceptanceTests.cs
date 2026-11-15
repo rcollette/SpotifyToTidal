@@ -96,8 +96,10 @@ sealed class FakeMusicApi : HttpMessageHandler
         }
         if (uri.Host is "tidal.test" or "openapi.tidal.com")
         {
-            if (!request.Headers.Accept.Any(h => h.MediaType == "application/vnd.tidal.v1+json"))
-                throw new Exception("TIDAL media-type header absent");
+            if (!request.Headers.Accept.Any(h => h.MediaType == "application/vnd.api+json"))
+                throw new Exception("TIDAL JSON:API Accept header absent");
+            if (request.Content is not null && request.Content.Headers.ContentType?.ToString() != "application/vnd.api+json")
+                throw new Exception("TIDAL JSON:API Content-Type must have no charset parameter");
             if (path == "/v2/userCollectionTracks/me/relationships/items" && request.Method == HttpMethod.Get)
             {
                 TidalReads++;
