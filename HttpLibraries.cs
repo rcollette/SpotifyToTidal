@@ -44,7 +44,7 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
                 continue;
             }
             if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"{Name} returned {(int)response.StatusCode}: {body[..Math.Min(body.Length, 400)]}");
+                throw new HttpRequestException($"{Name} returned {(int)response.StatusCode} for {req.Method} {req.RequestUri}: {body[..Math.Min(body.Length, 400)]}", null, response.StatusCode);
             return JsonSerializer.Deserialize(string.IsNullOrWhiteSpace(body) ? "{}" : body, responseType)
                 ?? throw new JsonException($"{Name} returned null JSON.");
         }
@@ -119,6 +119,23 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
     public override string Name => "TIDAL";
     readonly string country = countryCode;
 
+    // TIDAL pagination links are sometimes relative to the /v2 API root
+    // rather than to the hostname root. Follow them without losing /v2.
+    static string? NextPage(string? href, string currentPath)
+    {
+        if (href is null) return null;
+        if (href.StartsWith("?", StringComparison.Ordinal))
+            return currentPath.Split('?')[0] + href;
+        if (href.StartsWith("/v2/", StringComparison.Ordinal))
+            return href;
+        if (href.StartsWith("/", StringComparison.Ordinal))
+            return "/v2" + href;
+        // Uri.TryCreate can treat slash-prefixed paths as absolute file URIs,
+        // so test URI schemes only after handling rooted API paths above.
+        if (Uri.TryCreate(href, UriKind.Absolute, out _)) return href;
+        return "/v2/" + href;
+    }
+
     static Track? Parse(TidalTrackDto? item, IReadOnlyList<TidalArtistDto> included)
     {
         if (string.IsNullOrWhiteSpace(item?.Id)) return null;
@@ -132,12 +149,27 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
     public override async Task<IReadOnlyList<Track>> GetFavorites(CancellationToken ct = default)
     {
         List<Track> tracks = [];
-        string? next = "/v2/userCollectionTracks/me/relationships/items?countryCode=" + Escape(country);
+        // The user-collection relationship endpoint has no countryCode parameter.
+        // Country context is applied when hydrating individual track metadata.
+        string? next = "/v2/userCollectionTracks/me/relationships/items";
         HashSet<string> pages = [];
         while (next is not null && pages.Add(next))
         {
-            var page = await Request(HttpMethod.Get, next,
-                AppJsonContext.Default.TidalCollectionPage, ct: ct);
+            TidalCollectionPage page;
+            try
+            {
+                page = await Request(HttpMethod.Get, next,
+                    AppJsonContext.Default.TidalCollectionPage, ct: ct);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                // TIDAL may deliberately return 404 for resources unavailable to an app.
+                throw new HttpRequestException(
+                    ex.Message + " Check that your TIDAL developer app permits collection.read, " +
+                    "then run 'login tidal' to authorize the new scope. If the collection endpoint " +
+                    "still returns 404, ask TIDAL developer support whether track-collection " +
+                    "access is enabled for your application.", ex, ex.StatusCode);
+            }
             foreach (var entry in page.Data)
             {
                 if (entry.Id is null) continue;
@@ -147,7 +179,7 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
                 if (Parse(detail.Data, detail.Included) is { } song)
                     tracks.Add(song);
             }
-            next = page.Links?.Next;
+            next = NextPage(page.Links?.Next, next);
         }
         return tracks.DistinctBy(t => t.Id).ToList();
     }
@@ -169,7 +201,7 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
                     string.Equals(track.Isrc, isrc, StringComparison.OrdinalIgnoreCase))
                     tracks.Add(track);
             }
-            next = page.Links?.Next;
+            next = NextPage(page.Links?.Next, next);
         }
         return tracks.DistinctBy(t => t.Id).ToList();
     }
