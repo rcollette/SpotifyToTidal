@@ -124,11 +124,16 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
     static string? NextPage(string? href, string currentPath)
     {
         if (href is null) return null;
-        if (Uri.TryCreate(href, UriKind.Absolute, out _)) return href;
         if (href.StartsWith("?", StringComparison.Ordinal))
             return currentPath.Split('?')[0] + href;
-        return href.StartsWith("/v2/", StringComparison.Ordinal)
-            ? href : "/v2/" + href.TrimStart('/');
+        if (href.StartsWith("/v2/", StringComparison.Ordinal))
+            return href;
+        if (href.StartsWith("/", StringComparison.Ordinal))
+            return "/v2" + href;
+        // Uri.TryCreate can treat slash-prefixed paths as absolute file URIs,
+        // so test URI schemes only after handling rooted API paths above.
+        if (Uri.TryCreate(href, UriKind.Absolute, out _)) return href;
+        return "/v2/" + href;
     }
 
     static Track? Parse(TidalTrackDto? item, IReadOnlyList<TidalArtistDto> included)
