@@ -422,6 +422,20 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
+    public async Task Tidal_collection_403_reports_request_but_does_not_apply_404_specific_message()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(new HttpResponseMessage(HttpStatusCode.Forbidden)
+        {
+            Content = new StringContent("collection permission denied")
+        });
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
+        Assert.Equal(HttpStatusCode.Forbidden, exception.StatusCode);
+        Assert.Contains("TIDAL returned 403 for GET https://tidal.test/v2/userCollectionTracks/me/relationships/items", exception.Message);
+        Assert.DoesNotContain("ask TIDAL developer support", exception.Message);
+    }
+
+    [Fact]
     public async Task Tidal_track_detail_404_identifies_track_request_without_misdiagnosing_collection_scope()
     {
         var handler = new ScriptedHandler();
