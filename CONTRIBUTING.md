@@ -172,7 +172,8 @@ The synchronization algorithm deliberately matches a destination only when ISRC,
 
 Create a topic branch, make your changes, and open a pull request against `main`. The [CI workflow](.github/workflows/ci.yml) runs on pull requests and includes:
 
-- Unit and acceptance tests on **Linux x64, Windows x64, macOS Intel, and macOS Apple Silicon**.
+- Run **unit tests first** on Linux x64, Windows x64, macOS Intel, and macOS Apple Silicon. The `unit-tests` aggregate check must succeed on all four targets **before** any acceptance-test matrix job starts.
+- Run acceptance tests on those same four platforms only after unit tests pass. The combined 100% coverage job is also gated on successful unit tests, and collects unit coverage before acceptance coverage.
 - Native AOT publish and executable smoke tests on the same four targets.
 - One combined Coverlet coverage gate at **100% line / branch / method**.
 - Warning-as-error builds; the repository's ruleset may also require CodeQL scanning.
