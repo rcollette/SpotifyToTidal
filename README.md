@@ -1,74 +1,73 @@
-# Spotify ↔ TIDAL Favorites Sync
+# SpotifyToTidal
 
-A command-line tool that synchronizes **Spotify Liked Songs** and **TIDAL Favorite Tracks** in either direction. It only **adds** favorites: it never removes tracks from either service. You can preview changes before syncing.
+Synchronize **Spotify Liked Songs** and **TIDAL Favorite Tracks** in either direction, or both ways. SpotifyToTidal only **adds** favorites; it never removes any. Use a dry run to preview changes before syncing.
 
-Available for Windows, macOS (Intel and Apple Silicon), and Linux.
+Runs on Windows, macOS (Apple Silicon or Intel), and Linux as a command-line application.
 
-## Download and install
+## 1. Download and install
 
-1. Open the [latest GitHub release](https://github.com/rcollette/SpotifyToTidal/releases).
-2. Download the file for your computer:
+Download the appropriate archive from **[GitHub Releases](https://github.com/rcollette/SpotifyToTidal/releases)**.
 
-   | Computer | Download filename ends with |
-   | --- | --- |
-   | Windows 64-bit | `win-x64.zip` |
-   | macOS Apple Silicon (M1/M2/M3/M4 and later) | `osx-arm64.tar.gz` |
-   | macOS Intel | `osx-x64.tar.gz` |
-   | Linux 64-bit (x86-64) | `linux-x64.tar.gz` |
+| Computer | Release filename suffix |
+| --- | --- |
+| Windows x64 | `win-x64.zip` |
+| macOS Apple Silicon | `osx-arm64.tar.gz` |
+| macOS Intel | `osx-x64.tar.gz` |
+| Linux x64 | `linux-x64.tar.gz` |
 
-3. Extract the archive into a folder of your choice. Open a terminal (or PowerShell on Windows) **in that folder**.
+Extract the archive into a folder and open Terminal or PowerShell **in that folder**. Releases contain a native, self-contained executable: **you do not need to install .NET**.
 
-These releases include a native, self-contained executable. **You do not need to install .NET.** macOS binaries are not currently signed/notarized, and Windows binaries are not code-signed, so operating-system security warnings may appear.
+> **Security notice:** macOS releases are currently unsigned and not notarized; Windows releases are not code-signed. Your operating system may show a warning.
 
-## Get your Spotify Client ID
+## 2. Get your Spotify Client ID
 
-You must register your own Spotify application; your normal Spotify account password is **not** a Client ID.
-
-1. Sign in to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-2. Select **Create app** (or open an app you already manage). Follow the prompts to enter the app name and description; select the **Web API** if asked which API you will use.
-3. Add this **Redirect URI** to the app's settings, and save it:
+1. Sign in to the **[Spotify Developer Dashboard](https://developer.spotify.com/dashboard)**.
+2. Create an application (or open one you already own). Select **Web API** when asked which API you intend to use.
+3. In the app's settings, add this **Redirect URI** and save:
 
    ```text
    http://127.0.0.1:8765/callback/
    ```
 
-4. Open the app's **Settings** and copy its **Client ID**. Use that value for `spotifyClientId`.
+4. Copy the app's **Client ID** from its settings. You will put it in `spotifyClientId`.
 
-Spotify's development-mode apps require the app owner to have an active **Spotify Premium** subscription. Spotify also limits which accounts can authorize a development-mode app; add additional users in your developer dashboard if needed. See [Spotify's getting-started guide](https://developer.spotify.com/documentation/web-api/tutorials/getting-started) and [redirect URI requirements](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri).
+This tool uses PKCE, so you **do not need the Client Secret**. Spotify requires Premium for the owner of a development-mode app and restricts which Spotify accounts may authorize it. If another account will sign in, add it to the app's user allowlist when applicable.
 
-## Get your TIDAL Client ID
+See Spotify's [app registration guide](https://developer.spotify.com/documentation/web-api/concepts/apps), [redirect URI rules](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri), and [development-mode restrictions](https://developer.spotify.com/documentation/web-api/concepts/quota-modes).
 
-1. Sign in to the [TIDAL Developer Portal](https://developer.tidal.com/).
-2. Go to **Manage apps**, and register an application (or open one you already registered).
-3. Configure this exact OAuth **Redirect URI**:
+## 3. Get your TIDAL Client ID
+
+1. Sign in to the **[TIDAL Developer Portal](https://developer.tidal.com/)**.
+2. Open **Manage apps** and register an application, or select an existing one.
+3. Set its OAuth **Redirect URI** to:
 
    ```text
    http://127.0.0.1:8766/callback/
    ```
 
-4. Copy the application's **Client ID** into `tidalClientId`. The application needs permission to read and modify the user's collection.
+4. Copy its **Client ID** into `tidalClientId`. The app must be permitted to request collection read/write access for synchronization.
 
-TIDAL's developer portal controls application registration and permissions. If you cannot create an app or the requested collection permissions are unavailable, refer to [TIDAL's authorization documentation](https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization) or its developer support resources. This tool uses **OAuth authorization-code flow with PKCE** and needs **Client IDs, not Client Secrets**.
+A Client Secret is **not needed** for the PKCE authorization flow. If the portal does not grant the requested scopes, syncing the corresponding collection may not work. See [TIDAL's OAuth documentation](https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization).
 
-## Configure the application
+## 4. Configure
 
-The extracted download contains `appsettings.example.json`. Copy it to a `config.json` file in the `.spotify-to-tidal` directory of your home folder.
+From the extracted application directory, copy `appsettings.example.json` to `config.json` in a `.spotify-to-tidal` folder in your home directory.
 
-**macOS / Linux:**
+**macOS / Linux**
 
 ```sh
 mkdir -p ~/.spotify-to-tidal
 cp appsettings.example.json ~/.spotify-to-tidal/config.json
 ```
 
-**Windows (PowerShell):**
+**Windows PowerShell**
 
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.spotify-to-tidal"
 Copy-Item .\appsettings.example.json "$HOME\.spotify-to-tidal\config.json"
 ```
 
-Edit the resulting `config.json` and replace the two `REPLACE_...` placeholders. The complete default configuration is:
+Edit `config.json` and replace the two Client ID placeholders. Keep the redirect addresses exactly as registered, **including the trailing slashes**:
 
 ```json
 {
@@ -81,13 +80,13 @@ Edit the resulting `config.json` and replace the two `REPLACE_...` placeholders.
 }
 ```
 
-The redirect URIs must **exactly match** those registered in the corresponding developer portals, including the final slash. Use `127.0.0.1`, not `localhost`. `countryCode` is the two-letter country code used for TIDAL catalog requests; change `US` if applicable. Your TIDAL app must be permitted to request the scopes configured in `tidalScopes`.
+Use `127.0.0.1`, not `localhost`. Change `countryCode` for your TIDAL market if necessary. Keep your `config.json` and the OAuth token files private.
 
-## Sign in and sync
+## 5. Sign in and sync
 
-Run these commands in the extracted application folder.
+Run these commands from the extracted application directory.
 
-**macOS / Linux:**
+**macOS / Linux**
 
 ```sh
 ./SpotifyToTidal login spotify
@@ -96,7 +95,7 @@ Run these commands in the extracted application folder.
 ./SpotifyToTidal sync
 ```
 
-**Windows (PowerShell):**
+**Windows PowerShell**
 
 ```powershell
 .\SpotifyToTidal.exe login spotify
@@ -105,24 +104,24 @@ Run these commands in the extracted application folder.
 .\SpotifyToTidal.exe sync
 ```
 
-The login commands open a browser to authorize each account. If the browser does not open, copy the authorization URL printed in the terminal and visit it manually. Return to the terminal after approving access.
+Each `login` opens a browser for authorization. If the browser does not open, visit the URL printed in the terminal and complete authorization there.
 
-Run `sync --dry-run` first to preview additions without changing either library. Run `sync` to add matching favorites in **both** directions. You can also choose one direction:
+**Review the dry-run results before using `sync`.** By default, `sync` adds eligible favorites in both directions. Other options:
 
-| Command arguments | Action |
+| Command arguments | Purpose |
 | --- | --- |
-| `sync --direction spotify-to-tidal` | Add Spotify Liked Songs to TIDAL Favorites |
-| `sync --direction tidal-to-spotify` | Add TIDAL Favorites to Spotify Liked Songs |
-| `sync --direction both` | Sync both ways (the default) |
-| `sync --dry-run` | Preview changes; do not add anything |
-| `report` | Print the location of the last CSV report |
+| `sync --direction spotify-to-tidal` | Spotify → TIDAL only |
+| `sync --direction tidal-to-spotify` | TIDAL → Spotify only |
+| `sync --direction both` | Both directions (default) |
+| `sync --dry-run` | Preview without adding favorites |
+| `report` | Print the last CSV report's location |
 
-The CSV report is written to `~/.spotify-to-tidal/report.csv` on macOS/Linux or `%USERPROFILE%\.spotify-to-tidal\report.csv` on Windows. It includes outcomes such as `added`, `would-add`, `already-present`, `unmatched`, and `error`.
+The report is saved as `~/.spotify-to-tidal/report.csv` (macOS/Linux) or `%USERPROFILE%\.spotify-to-tidal\report.csv` (Windows). It identifies added, existing, unmatched, and failed tracks.
 
-Tracks are matched conservatively using their **ISRC, title, and primary artist**. Tracks without one unambiguous match are reported rather than added. The application does not remove favorites. Spotify or TIDAL API permissions and catalog availability can limit which songs can be transferred.
+Tracks are added only when the **ISRC, title, and primary artist** identify a unique match. Missing or ambiguous matches are reported, not added. Catalog access and API permissions can affect results.
 
-OAuth tokens are saved in the same configuration directory as JSON files. Keep that directory private; do not share your tokens or `config.json`.
+---
+
+**Want to build or contribute to the application?** See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 This project is not affiliated with Spotify or TIDAL.
-
-**Interested in developing or building from source?** See [CONTRIBUTING.md](https://github.com/rcollette/SpotifyToTidal/blob/main/CONTRIBUTING.md).
