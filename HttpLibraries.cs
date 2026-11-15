@@ -119,6 +119,18 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
     public override string Name => "TIDAL";
     readonly string country = countryCode;
 
+    // TIDAL pagination links are sometimes relative to the /v2 API root
+    // rather than to the hostname root. Follow them without losing /v2.
+    static string? NextPage(string? href, string currentPath)
+    {
+        if (href is null) return null;
+        if (Uri.TryCreate(href, UriKind.Absolute, out _)) return href;
+        if (href.StartsWith('?', StringComparison.Ordinal))
+            return currentPath.Split('?')[0] + href;
+        return href.StartsWith("/v2/", StringComparison.Ordinal)
+            ? href : "/v2/" + href.TrimStart('/');
+    }
+
     static Track? Parse(TidalTrackDto? item, IReadOnlyList<TidalArtistDto> included)
     {
         if (string.IsNullOrWhiteSpace(item?.Id)) return null;
@@ -162,7 +174,7 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
                 if (Parse(detail.Data, detail.Included) is { } song)
                     tracks.Add(song);
             }
-            next = page.Links?.Next;
+            next = NextPage(page.Links?.Next, next);
         }
         return tracks.DistinctBy(t => t.Id).ToList();
     }
@@ -184,7 +196,7 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
                     string.Equals(track.Isrc, isrc, StringComparison.OrdinalIgnoreCase))
                     tracks.Add(track);
             }
-            next = page.Links?.Next;
+            next = NextPage(page.Links?.Next, next);
         }
         return tracks.DistinctBy(t => t.Id).ToList();
     }
