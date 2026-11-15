@@ -168,6 +168,17 @@ All production JSON request/response objects must use **concrete DTO types** wit
 
 The synchronization algorithm deliberately matches a destination only when ISRC, normalized title, and primary artist identify exactly one candidate. Never weaken matching or introduce removal of existing favorites without explicitly changing the stated product behavior and tests.
 
+
+### Diagnosing TIDAL HTTP 404 responses
+
+The TIDAL collection relationship endpoint is `GET /v2/userCollectionTracks/me/relationships/items`, **without** a `countryCode` parameter. Individual `/v2/tracks/{id}` requests may use `countryCode` to obtain market-specific track metadata. Both calls use `application/vnd.api+json`.
+
+HTTP errors include the request method and URL but never the OAuth bearer token. A 404 can mean either a genuinely unavailable resource or a collection inaccessible to the developer application; [TIDAL's official API reference](https://tidal-music.github.io/tidal-api-reference/) states that inaccessible resources may behave as if they do not exist. Distinguish collection read failures from track-detail failures by the reported URL.
+
+For a collection read 404, confirm `collection.read` is permitted for the TIDAL application and re-run `login tidal` to obtain a fresh authorization. If the endpoint remains unavailable with fresh credentials, request assistance from TIDAL Developer Support; do not mask the failure as an empty collection or silently disable one direction of sync.
+
+The xUnit HTTP acceptance suite tests the exact collection path and the 404 failure modes without real credentials. Changes to TIDAL routes should be checked against the [current provider OpenAPI specification](https://tidal-music.github.io/tidal-api-reference/tidal-api-oas.json), not just simulated HTTP responses.
+
 ## Pull requests and CI
 
 Create a topic branch, make your changes, and open a pull request against `main`. The [CI workflow](.github/workflows/ci.yml) runs on pull requests and includes:
