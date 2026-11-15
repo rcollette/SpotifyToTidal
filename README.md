@@ -120,6 +120,16 @@ The report is saved as `~/.spotify-to-tidal/report.csv` (macOS/Linux) or `%USERP
 
 Tracks are added only when the **ISRC, title, and primary artist** identify a unique match. Missing or ambiguous matches are reported, not added. Catalog access and API permissions can affect results.
 
+
+## Troubleshooting TIDAL 404 errors
+
+If `sync --dry-run` fails with **TIDAL returned 404**, first check the **HTTP method and URL** in the error. A 404 is not proof that the address is invalid: [TIDAL's API documentation](https://tidal-music.github.io/tidal-api-reference/) says that a resource unavailable to your application can appear not to exist.
+
+- **`GET /v2/userCollectionTracks/me/relationships/items`**: Verify that your TIDAL developer app has permission for the `collection.read` scope, then run `SpotifyToTidal login tidal` again (or `./SpotifyToTidal login tidal` on macOS/Linux). If it still responds with 404, TIDAL may not have enabled track-collection access for your app; contact TIDAL developer support.
+- **`GET /v2/tracks/<id>`**: The individual track may not be available or visible to your account in the configured market. Note the HTTP method and path when reporting this issue.
+
+Do **not** share access tokens, refresh tokens, or authorization URLs from your terminal output.
+
 ---
 
 **Want to build or contribute to the application?** See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
