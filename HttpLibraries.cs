@@ -26,7 +26,11 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await bearerToken());
             req.Headers.Accept.ParseAdd(acceptType);
             if (serializedPayload is not null)
-                req.Content = new StringContent(serializedPayload, Encoding.UTF8, acceptType);
+            {
+                req.Content = new StringContent(serializedPayload, Encoding.UTF8);
+                // JSON:API disallows an implicit "charset=utf-8" media-type parameter.
+                req.Content.Headers.ContentType = new MediaTypeHeaderValue(acceptType);
+            }
 
             using var response = await Http.SendAsync(req, ct);
             var body = await response.Content.ReadAsStringAsync(ct);
@@ -110,7 +114,7 @@ public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Ur
 
 public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl,
     string countryCode = "US", Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
-    : HttpTrackLibrary(http, token, baseUrl, "application/vnd.tidal.v1+json", retryDelay)
+    : HttpTrackLibrary(http, token, baseUrl, "application/vnd.api+json", retryDelay)
 {
     public override string Name => "TIDAL";
     readonly string country = countryCode;
