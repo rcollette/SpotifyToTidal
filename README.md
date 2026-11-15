@@ -6,7 +6,7 @@ Available for Windows, macOS (Intel and Apple Silicon), and Linux.
 
 ## Download and install
 
-1. Open the [latest GitHub release](https://github.com/rcollette/SpotifyToTidal/releases/latest).
+1. Open the [latest GitHub release](https://github.com/rcollette/SpotifyToTidal/releases).
 2. Download the file for your computer:
 
    | Computer | Download filename ends with |
@@ -125,4 +125,4 @@ OAuth tokens are saved in the same configuration directory as JSON files. Keep t
 
 This project is not affiliated with Spotify or TIDAL.
 
-**Interested in developing or building from source?** See [CONTRIBUTING.md](CONTRIBUTING.md).
+**Interested in developing or building from source?** See [CONTRIBUTING.md](https://github.com/rcollette/SpotifyToTidal/blob/main/CONTRIBUTING.md).
