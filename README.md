@@ -1,135 +1,128 @@
 # Spotify ↔ TIDAL Favorites Sync
 
-A cross-platform **.NET 10** command-line application that additively synchronizes
-**Spotify Liked Songs** and **TIDAL Favorite Tracks**. Supports both directions, one-way
-sync and a preview mode. Songs without a unique exact ISRC + title + artist match
-are reported, never automatically favorited.
+A command-line tool that synchronizes **Spotify Liked Songs** and **TIDAL Favorite Tracks** in either direction. It only **adds** favorites: it never removes tracks from either service. You can preview changes before syncing.
 
-> **Development status:** Automated tests use simulated, authenticated HTTP API responses
-> and do **not** demonstrate that the live Spotify and TIDAL developer integrations have
-> been granted all required scopes. Validate against both accounts before using write mode.
+Available for Windows, macOS (Intel and Apple Silicon), and Linux.
 
-## Setup
+## Download and install
 
-Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
-Register Spotify and TIDAL developer applications with compatible OAuth PKCE redirects.
-Spotify development-mode apps require an eligible Premium account.
+1. Open the [latest GitHub release](https://github.com/rcollette/SpotifyToTidal/releases).
+2. Download the file for your computer:
 
-1. Copy `appsettings.example.json` to `~/.spotify-to-tidal/config.json`
-   (Windows: `%USERPROFILE%\.spotify-to-tidal\config.json`).
-2. Fill in the public OAuth application client IDs and exact registered loopback redirect URLs.
-3. Execute:
+   | Computer | Download filename ends with |
+   | --- | --- |
+   | Windows 64-bit | `win-x64.zip` |
+   | macOS Apple Silicon (M1/M2/M3/M4 and later) | `osx-arm64.tar.gz` |
+   | macOS Intel | `osx-x64.tar.gz` |
+   | Linux 64-bit (x86-64) | `linux-x64.tar.gz` |
+
+3. Extract the archive into a folder of your choice. Open a terminal (or PowerShell on Windows) **in that folder**.
+
+These releases include a native, self-contained executable. **You do not need to install .NET.** macOS binaries are not currently signed/notarized, and Windows binaries are not code-signed, so operating-system security warnings may appear.
+
+## Get your Spotify Client ID
+
+You must register your own Spotify application; your normal Spotify account password is **not** a Client ID.
+
+1. Sign in to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+2. Select **Create app** (or open an app you already manage). Follow the prompts to enter the app name and description; select the **Web API** if asked which API you will use.
+3. Add this **Redirect URI** to the app's settings, and save it:
+
+   ```text
+   http://127.0.0.1:8765/callback/
+   ```
+
+4. Open the app's **Settings** and copy its **Client ID**. Use that value for `spotifyClientId`.
+
+Spotify's development-mode apps require the app owner to have an active **Spotify Premium** subscription. Spotify also limits which accounts can authorize a development-mode app; add additional users in your developer dashboard if needed. See [Spotify's getting-started guide](https://developer.spotify.com/documentation/web-api/tutorials/getting-started) and [redirect URI requirements](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri).
+
+## Get your TIDAL Client ID
+
+1. Sign in to the [TIDAL Developer Portal](https://developer.tidal.com/).
+2. Go to **Manage apps**, and register an application (or open one you already registered).
+3. Configure this exact OAuth **Redirect URI**:
+
+   ```text
+   http://127.0.0.1:8766/callback/
+   ```
+
+4. Copy the application's **Client ID** into `tidalClientId`. The application needs permission to read and modify the user's collection.
+
+TIDAL's developer portal controls application registration and permissions. If you cannot create an app or the requested collection permissions are unavailable, refer to [TIDAL's authorization documentation](https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization) or its developer support resources. This tool uses **OAuth authorization-code flow with PKCE** and needs **Client IDs, not Client Secrets**.
+
+## Configure the application
+
+The extracted download contains `appsettings.example.json`. Copy it to a `config.json` file in the `.spotify-to-tidal` directory of your home folder.
+
+**macOS / Linux:**
 
 ```sh
-dotnet run -- login spotify
-dotnet run -- login tidal
-dotnet run -- sync --dry-run
-dotnet run -- sync
-dotnet run -- sync --direction spotify-to-tidal
-dotnet run -- sync --direction tidal-to-spotify
-dotnet run -- report
+mkdir -p ~/.spotify-to-tidal
+cp appsettings.example.json ~/.spotify-to-tidal/config.json
 ```
 
-Sync **only adds** favorites. It does not delete/unlike songs on either service.
-Preview writes nothing; the CSV report lists statuses including `would-add`,
-`added`, `already-present`, `unmatched` and `error`. Re-running a partial
-sync is safe because both libraries are fetched before computing additions.
+**Windows (PowerShell):**
 
-OAuth access/refresh token JSON files are stored under the user's home directory.
-Restrict access to that directory. Never commit tokens or `config.json`.
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.spotify-to-tidal"
+Copy-Item .\appsettings.example.json "$HOME\.spotify-to-tidal\config.json"
+```
 
-## Testing and CI
+Edit the resulting `config.json` and replace the two `REPLACE_...` placeholders. The complete default configuration is:
 
-On every pull request and push to `main`, CI runs a Linux/macOS/Windows test and
-Native AOT matrix, plus stable aggregate checks. These checks use .NET 10 and require no real Spotify or TIDAL accounts,
-developer credentials, GitHub secrets or Docker.
+```json
+{
+  "spotifyClientId": "YOUR_SPOTIFY_CLIENT_ID",
+  "tidalClientId": "YOUR_TIDAL_CLIENT_ID",
+  "spotifyRedirectUri": "http://127.0.0.1:8765/callback/",
+  "tidalRedirectUri": "http://127.0.0.1:8766/callback/",
+  "countryCode": "US",
+  "tidalScopes": "collection.read collection.write"
+}
+```
 
-| Job | What it verifies |
+The redirect URIs must **exactly match** those registered in the corresponding developer portals, including the final slash. Use `127.0.0.1`, not `localhost`. `countryCode` is the two-letter country code used for TIDAL catalog requests; change `US` if applicable. Your TIDAL app must be permitted to request the scopes configured in `tidalScopes`.
+
+## Sign in and sync
+
+Run these commands in the extracted application folder.
+
+**macOS / Linux:**
+
+```sh
+./SpotifyToTidal login spotify
+./SpotifyToTidal login tidal
+./SpotifyToTidal sync --dry-run
+./SpotifyToTidal sync
+```
+
+**Windows (PowerShell):**
+
+```powershell
+.\SpotifyToTidal.exe login spotify
+.\SpotifyToTidal.exe login tidal
+.\SpotifyToTidal.exe sync --dry-run
+.\SpotifyToTidal.exe sync
+```
+
+The login commands open a browser to authorize each account. If the browser does not open, copy the authorization URL printed in the terminal and visit it manually. Return to the terminal after approving access.
+
+Run `sync --dry-run` first to preview additions without changing either library. Run `sync` to add matching favorites in **both** directions. You can also choose one direction:
+
+| Command arguments | Action |
 | --- | --- |
-| `unit-tests` | xUnit tests for recording matching, CSV escaping, error handling, cancellation, duplicates, and additive sync |
-| `acceptance-tests` | xUnit tests exercising the real HTTP adapters, CLI, OAuth PKCE/refresh, pagination, throttling, one-way and bidirectional workflows against deterministic fake HTTP services |
-| `coverage` | Coverlet merges unit **and** acceptance coverage and fails unless **line, branch and method coverage are each 100%** across all hand-authored application source |
-| `native-aot` | Publishes and smoke-tests Native AOT executables across Linux, Windows, and both macOS architectures, with `TreatWarningsAsErrors=true` |
+| `sync --direction spotify-to-tidal` | Add Spotify Liked Songs to TIDAL Favorites |
+| `sync --direction tidal-to-spotify` | Add TIDAL Favorites to Spotify Liked Songs |
+| `sync --direction both` | Sync both ways (the default) |
+| `sync --dry-run` | Preview changes; do not add anything |
+| `report` | Print the location of the last CSV report |
 
-Run the xUnit suites locally with:
+The CSV report is written to `~/.spotify-to-tidal/report.csv` on macOS/Linux or `%USERPROFILE%\.spotify-to-tidal\report.csv` on Windows. It includes outcomes such as `added`, `would-add`, `already-present`, `unmatched`, and `error`.
 
-```sh
-dotnet test tests/UnitTests/UnitTests.csproj -c Release
-dotnet test tests/AcceptanceTests/AcceptanceTests.csproj -c Release
-```
+Tracks are matched conservatively using their **ISRC, title, and primary artist**. Tracks without one unambiguous match are reported rather than added. The application does not remove favorites. Spotify or TIDAL API permissions and catalog availability can limit which songs can be transferred.
 
-The acceptance suite injects an `HttpMessageHandler` into the actual
-Spotify and TIDAL adapters. All HTTP responses and requests in application code and
-test fixtures use concrete DTO types and `System.Text.Json` source-generated
-metadata from `AppJsonContext`. No reflection-based JSON serialization is used.
-The compiler-generated `AppJsonContext` implementation is excluded from coverage
-because its branches are produced by Microsoft's generator, not by this project.
-All hand-written application logic remains within the 100% coverage threshold.
+OAuth tokens are saved in the same configuration directory as JSON files. Keep that directory private; do not share your tokens or `config.json`.
 
-### Pull request requirements
+This project is not affiliated with Spotify or TIDAL.
 
-The repository's branch ruleset may also require a completed CodeQL analysis.
-CodeQL is configured in the repository's **Settings → Advanced Security →
-Code scanning** and must report results for the pull request's current head
-commit before GitHub will permit merging.
-
-
-Under GitHub's repository ruleset, require the exact status names:
-`unit-tests`, `acceptance-tests`, `coverage`, and `native-aot`.
-The ruleset's required-status-check list must actually contain those names;
-simply running the checks is not sufficient to prevent merging failed checks.
-Review results on each pull request's **Checks** tab.
-
-## GitHub releases
-
-Use **Actions → Release → Run workflow** after this PR has been merged to
-`main`. Select the `main` branch, provide a new semantic-version tag such as
-`v0.1.0`, and optionally mark the release as a prerelease.
-
-The manually triggered workflow publishes four native-AOT release downloads:
-
-| Release asset | Platform |
-| --- | --- |
-| `SpotifyToTidal-v0.1.0-linux-x64.tar.gz` | Linux x86-64 |
-| `SpotifyToTidal-v0.1.0-osx-arm64.tar.gz` | macOS Apple Silicon |
-| `SpotifyToTidal-v0.1.0-osx-x64.tar.gz` | macOS Intel |
-| `SpotifyToTidal-v0.1.0-win-x64.zip` | Windows x86-64 |
-
-Each archive contains a native self-contained executable, configuration example, and
-README. Unix releases are `.tar.gz` files so extraction preserves executable permissions;
-Windows uses `.zip`. All archives are built on their target OS and smoke-tested before GitHub
-creates the version tag and attaches the archives to the public **Releases** page.
-No release is published on pull requests: those runs only verify the packaging and
-provide temporary CI artifacts. Version tags are immutable in this workflow—use a
-new version for each subsequent release. Both macOS archives are unsigned and
-not notarized; Windows binaries are unsigned. Operating-system security prompts
-may appear until signing is set up.
-
-## Publish
-
-```sh
-dotnet publish -c Release -r win-x64 --self-contained true
-dotnet publish -c Release -r osx-x64 --self-contained true
-dotnet publish -c Release -r osx-arm64 --self-contained true
-```
-
-Native AOT compilation requires platform-specific tools, and macOS AOT builds
-must run on macOS. For a standard self-contained build without AOT add
-`-p:PublishAot=false`.
-
-## Known limitations / API validation
-
-- Live TIDAL collection-write permissions, authorization scopes and response
-  payloads remain unverified until the developer applications are registered.
-- A track may exist in multiple versions under one ISRC; the matcher deliberately
-  declines ambiguous or incomplete matches.
-- The search adapters use available catalog metadata and pagination. When the
-  TIDAL artist relationship isn't returned, the track is skipped rather than
-  risking an incorrect favorite.
-- This project is not affiliated with Spotify or TIDAL.
-
-Official documentation:
-- https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks
-- https://developer.spotify.com/documentation/web-api/reference/save-library-items
-- https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide
-- https://tidal-music.github.io/tidal-api-reference/
+**Interested in developing or building from source?** See [CONTRIBUTING.md](https://github.com/rcollette/SpotifyToTidal/blob/main/CONTRIBUTING.md).
