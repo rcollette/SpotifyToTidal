@@ -26,16 +26,65 @@ dotnet build SpotifyToTidal.csproj -c Debug
 
 `SpotifyToTidal.csproj` targets `net10.0` and sets `PublishAot=true` for native release builds. You can perform ordinary development builds without first producing a native executable.
 
-### Local configuration and developer app registration
+## Development configuration and API credentials
 
-The CLI reads configuration from the **user's home directory**, **not** from the repository's root or `bin` output folder:
+The application loads `config.json` and its persisted OAuth tokens from the
+**user's home directory**, not the source or build output directory.
 
-- macOS/Linux: `~/.spotify-to-tidal/config.json`
-- Windows: `%USERPROFILE%\.spotify-to-tidal\config.json`
+| OS | Configuration file |
+| --- | --- |
+| macOS / Linux | `~/.spotify-to-tidal/config.json` |
+| Windows | `%USERPROFILE%\.spotify-to-tidal\config.json` |
 
-Create that directory and copy the repository's `appsettings.example.json` into it as `config.json`. The [README setup instructions](README.md#get-your-spotify-client-id) explain how to register separate Spotify and TIDAL developer apps, obtain each Client ID, and register the exact loopback redirect URLs.
+### Register developer applications
 
-The sample settings are:
+To test against real music accounts, obtain an application **Client ID** from
+*each* provider. Both providers use authorization-code PKCE in this CLI; do not
+check a Client Secret into the repository.
+
+**Spotify**
+
+1. Open the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+   and create/select an application with **Web API** access.
+2. Set its redirect URL to `http://127.0.0.1:8765/callback/` in its app settings.
+3. Copy the application's Client ID to `spotifyClientId`.
+4. Verify your developer app's Premium requirement and account allowlist.
+   See [Spotify app setup](https://developer.spotify.com/documentation/web-api/concepts/apps)
+   and [development-mode rules](https://developer.spotify.com/documentation/web-api/concepts/quota-modes).
+
+**TIDAL**
+
+1. Sign in to the [TIDAL Developer Portal](https://developer.tidal.com/)
+   and open **Manage apps**.
+2. Create/select an app, register `http://127.0.0.1:8766/callback/` as the redirect,
+   and copy its Client ID to `tidalClientId`.
+3. Ensure the app is permitted to request collection read/write scopes.
+   TIDAL controls access to API endpoints and OAuth scopes. See
+   [TIDAL authorization](https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization).
+
+The callback paths require the **final slash** and the literal loopback IP address
+`127.0.0.1`. The defaults are hard-coded in `appsettings.example.json` and must
+match the settings registered with the providers.
+
+### Create local configuration
+
+Run from the repository's root directory.
+
+**macOS / Linux**
+
+```sh
+mkdir -p ~/.spotify-to-tidal
+cp appsettings.example.json ~/.spotify-to-tidal/config.json
+```
+
+**Windows PowerShell**
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.spotify-to-tidal"
+Copy-Item .\appsettings.example.json "$HOME\.spotify-to-tidal\config.json"
+```
+
+Update the copied `config.json`:
 
 ```json
 {
@@ -48,9 +97,17 @@ The sample settings are:
 }
 ```
 
-Both services use authorization-code **PKCE**; no client secret is stored or required for this CLI. The Spotify authorization scopes are supplied in `Program.cs` (`user-library-read user-library-modify`); TIDAL scopes are configured using `tidalScopes`. The service may limit which scopes or endpoints your app can use.
+Replace both `REPLACE_...` values. Change `countryCode` if your TIDAL market is
+not the US; only request scopes your TIDAL app is allowed to use.
 
-Do not commit `config.json` or any `*-token.json` files. Tokens are persisted under the same `.spotify-to-tidal` directory as the configuration. Use separate developer credentials for testing against real accounts.
+Spotify OAuth scopes (`user-library-read user-library-modify`) are specified by
+`OAuthManager` in `Program.cs`; TIDAL OAuth scopes come from `tidalScopes`.
+Login tokens are saved alongside `config.json` as `spotify-token.json` and
+`tidal-token.json`. **Do not commit or share credentials or tokens.**
+
+Local unit and HTTP acceptance tests require **no Client IDs, user accounts,
+or live provider access**. Use developer credentials only when validating real
+provider integrations.
 
 ## Run and debug
 
