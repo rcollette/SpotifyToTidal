@@ -395,6 +395,59 @@ public sealed class HttpAdapterTests
         Assert.Equal("Fallback", Assert.Single(await Tidal(h).SearchIsrc("USAAA0000001")).Artist);
     }
 
+
+    [Fact]
+    public async Task Tidal_collection_cursor_link_relative_to_v2_root_preserves_api_prefix()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Links = new TidalLinksDto
+            {
+                Next = "/userCollectionTracks/me/relationships/items?page%5Bcursor%5D=NEXT"
+            }
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(Response(new TidalCollectionPage(), AppJsonContext.Default.TidalCollectionPage));
+        Assert.Empty(await Tidal(handler).GetFavorites());
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.StartsWith("GET https://tidal.test/v2/userCollectionTracks/me/relationships/items?",
+            handler.Requests[1]);
+        Assert.Contains("NEXT", handler.Requests[1]);
+    }
+
+    [Fact]
+    public async Task Tidal_track_search_cursor_only_link_retains_current_resource_path()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalTrackPage
+        {
+            Links = new TidalLinksDto { Next = "?page%5Bcursor%5D=CURSOR" }
+        }, AppJsonContext.Default.TidalTrackPage));
+        handler.Push(Response(new TidalTrackPage(), AppJsonContext.Default.TidalTrackPage));
+        Assert.Empty(await Tidal(handler).SearchIsrc("USAAA0000001"));
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.StartsWith("GET https://tidal.test/v2/tracks?page", handler.Requests[1]);
+        Assert.Contains("CURSOR", handler.Requests[1]);
+    }
+
+    [Fact]
+    public async Task Tidal_absolute_cursor_link_uses_supplied_api_url()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Links = new TidalLinksDto
+            {
+                Next = "https://tidal.test/v2/userCollectionTracks/me/relationships/items?page%5Bcursor%5D=LAST"
+            }
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(Response(new TidalCollectionPage(), AppJsonContext.Default.TidalCollectionPage));
+        Assert.Empty(await Tidal(handler).GetFavorites());
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Contains("/v2/userCollectionTracks/me/relationships/items?", handler.Requests[1]);
+        Assert.Contains("LAST", handler.Requests[1]);
+    }
+
     [Fact]
     public async Task Tidal_favorites_use_documented_collection_relationship_route_without_countryCode()
     {
