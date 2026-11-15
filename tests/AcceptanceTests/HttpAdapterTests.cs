@@ -271,7 +271,8 @@ public sealed class HttpAdapterTests
         });
         var ex = await Assert.ThrowsAsync<HttpRequestException>(() => Spotify(h).GetFavorites());
         Assert.Contains("Spotify returned 403", ex.Message);
-        Assert.True(ex.Message.Length < 440);
+        Assert.Contains(new string('x', 400), ex.Message);
+        Assert.DoesNotContain(new string('x', 401), ex.Message);
         Assert.Single(h.Requests);
     }
 
