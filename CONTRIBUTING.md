@@ -173,6 +173,8 @@ The synchronization algorithm deliberately matches a destination only when ISRC,
 
 The TIDAL collection relationship endpoint is `GET /v2/userCollectionTracks/me/relationships/items`, **without** a `countryCode` parameter. Individual `/v2/tracks/{id}` requests may use `countryCode` to obtain market-specific track metadata. Both calls use `application/vnd.api+json`.
 
+Cursor pagination is another routing concern: TIDAL may return `links.next` relative to the `/v2` API root (for example, `/userCollectionTracks/me/relationships/items?page[cursor]=...`). The adapter resolves these links under `/v2` before issuing subsequent requests; a missing `/v2` on page two can otherwise produce HTTP 404.
+
 HTTP errors include the request method and URL but never the OAuth bearer token. A 404 can mean either a genuinely unavailable resource or a collection inaccessible to the developer application; [TIDAL's official API reference](https://tidal-music.github.io/tidal-api-reference/) states that inaccessible resources may behave as if they do not exist. Distinguish collection read failures from track-detail failures by the reported URL.
 
 For a collection read 404, confirm `collection.read` is permitted for the TIDAL application and re-run `login tidal` to obtain a fresh authorization. If the endpoint remains unavailable with fresh credentials, request assistance from TIDAL Developer Support; do not mask the failure as an empty collection or silently disable one direction of sync.
