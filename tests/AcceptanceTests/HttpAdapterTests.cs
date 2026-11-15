@@ -410,7 +410,7 @@ public sealed class HttpAdapterTests
         var handler = new ScriptedHandler();
         handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound)
         {
-            Content = new StringContent("{\\"errors\\":[{\\"code\\":\\"NOT_FOUND\\",\\"detail\\":\\"Resource not found\\"}]}")
+            Content = new StringContent("""{"errors":[{"code":"NOT_FOUND","detail":"Resource not found"}]}""")
         });
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
         Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
@@ -431,7 +431,7 @@ public sealed class HttpAdapterTests
         }, AppJsonContext.Default.TidalCollectionPage));
         handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound)
         {
-            Content = new StringContent("{\\"errors\\":[{\\"code\\":\\"NOT_FOUND\\"}]}")
+            Content = new StringContent("""{"errors":[{"code":"NOT_FOUND"}]}""")
         });
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
         Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
