@@ -125,7 +125,7 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
     {
         if (href is null) return null;
         if (Uri.TryCreate(href, UriKind.Absolute, out _)) return href;
-        if (href.StartsWith('?', StringComparison.Ordinal))
+        if (href.StartsWith("?", StringComparison.Ordinal))
             return currentPath.Split('?')[0] + href;
         return href.StartsWith("/v2/", StringComparison.Ordinal)
             ? href : "/v2/" + href.TrimStart('/');
