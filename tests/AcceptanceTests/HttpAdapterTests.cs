@@ -394,4 +394,50 @@ public sealed class HttpAdapterTests
         Assert.Equal("Fallback", Assert.Single(await Tidal(h).SearchIsrc("USAAA0000001")).Artist);
     }
 
+    [Fact]
+    public async Task Tidal_favorites_use_documented_collection_relationship_route_without_countryCode()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage(), AppJsonContext.Default.TidalCollectionPage));
+        Assert.Empty(await Tidal(handler).GetFavorites());
+        Assert.Equal("GET https://tidal.test/v2/userCollectionTracks/me/relationships/items",
+            Assert.Single(handler.Requests));
+    }
+
+    [Fact]
+    public async Task Tidal_collection_404_reports_request_and_app_permissions_without_tokens()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("{\\"errors\\":[{\\"code\\":\\"NOT_FOUND\\",\\"detail\\":\\"Resource not found\\"}]}")
+        });
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
+        Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
+        Assert.Contains("TIDAL returned 404", exception.Message);
+        Assert.Contains("GET https://tidal.test/v2/userCollectionTracks/me/relationships/items", exception.Message);
+        Assert.Contains("collection.read", exception.Message);
+        Assert.Contains("login tidal", exception.Message);
+        Assert.DoesNotContain("test-access", exception.Message);
+    }
+
+    [Fact]
+    public async Task Tidal_track_detail_404_identifies_track_request_without_misdiagnosing_collection_scope()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [new TidalResourceDto { Id = "not-available", Type = "tracks" }]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("{\\"errors\\":[{\\"code\\":\\"NOT_FOUND\\"}]}")
+        });
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
+        Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
+        Assert.Contains("GET https://tidal.test/v2/tracks/not-available", exception.Message);
+        Assert.DoesNotContain("ask TIDAL developer support", exception.Message);
+    }
+
+
 }
