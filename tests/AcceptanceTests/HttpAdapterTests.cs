@@ -315,7 +315,8 @@ public sealed class HttpAdapterTests
             Data = [new TidalResourceDto { Id = "track-1" }], Links = null
         }, AppJsonContext.Default.TidalCollectionPage));
         h.Push(Response(new TidalTrackDetail { Data = null }, AppJsonContext.Default.TidalTrackDetail));
-        Assert.Empty(await Tidal(h).GetFavorites());
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(h).GetFavorites());
+        Assert.Contains("Every TIDAL favorite track has missing or unavailable metadata", ex.Message);
         Assert.Equal(2, h.Requests.Count);
     }
 
