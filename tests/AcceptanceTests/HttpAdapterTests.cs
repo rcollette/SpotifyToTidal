@@ -48,7 +48,7 @@ public sealed class HttpAdapterTests
             new Uri("https://spotify.test/"), wait);
     private static TidalLibrary Tidal(ScriptedHandler h, Func<TimeSpan, CancellationToken, Task>? wait = null) =>
         new(new HttpClient(h), () => Task.FromResult("test-access"),
-            new Uri("https://tidal.test/"), "US", wait);
+            new Uri("https://tidal.test/"), "US", wait, maxConcurrency: 1);
 
     [Fact]
     public async Task Spotify_saved_tracks_are_paginated_deduplicated_and_skip_invalid_rows()
@@ -119,15 +119,12 @@ public sealed class HttpAdapterTests
             Data = [new TidalResourceDto { Id = null }, new TidalResourceDto { Id = "tid-1" }],
             Links = new TidalLinksDto { Next = "/v2/favorites?page=2" }
         }, AppJsonContext.Default.TidalCollectionPage));
-        h.Push(Response(new TidalTrackDetail {
-            Data = TidalTrack("tid-1"), Included = [TidalArtist()]
-        }, AppJsonContext.Default.TidalTrackDetail));
         h.Push(Response(new TidalCollectionPage {
             Data = [new TidalResourceDto { Id = "tid-1" }, new TidalResourceDto { Id = "tid-2" }],
             Links = new TidalLinksDto { Next = "/v2/favorites?page=2" }
         }, AppJsonContext.Default.TidalCollectionPage));
         h.Push(Response(new TidalTrackDetail {
-            Data = TidalTrack("tid-1"), Included = []
+            Data = TidalTrack("tid-1"), Included = [TidalArtist()]
         }, AppJsonContext.Default.TidalTrackDetail));
         h.Push(Response(new TidalTrackDetail {
             Data = TidalTrack("tid-2", relationship:false, artistFallback:"Fallback Artist"), Included = []
@@ -136,7 +133,7 @@ public sealed class HttpAdapterTests
         Assert.Equal(2, list.Count);
         Assert.Equal("Singer", list[0].Artist);
         Assert.Equal("Fallback Artist", list[1].Artist);
-        Assert.Equal(5, h.Requests.Count);
+        Assert.Equal(4, h.Requests.Count);
     }
 
     [Fact]
@@ -318,7 +315,8 @@ public sealed class HttpAdapterTests
             Data = [new TidalResourceDto { Id = "track-1" }], Links = null
         }, AppJsonContext.Default.TidalCollectionPage));
         h.Push(Response(new TidalTrackDetail { Data = null }, AppJsonContext.Default.TidalTrackDetail));
-        Assert.Empty(await Tidal(h).GetFavorites());
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(h).GetFavorites());
+        Assert.Contains("Every TIDAL favorite track has missing or unavailable metadata", ex.Message);
         Assert.Equal(2, h.Requests.Count);
     }
 
@@ -569,11 +567,263 @@ public sealed class HttpAdapterTests
             Content = new StringContent("""{"errors":[{"code":"NOT_FOUND"}]}""")
         });
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
-        Assert.Contains("Every TIDAL favorite track detail request returned 404", exception.Message);
+        Assert.Contains("Every TIDAL favorite track has missing or unavailable metadata", exception.Message);
         Assert.Contains("config.json countryCode", exception.Message);
         Assert.DoesNotContain("ask TIDAL developer support", exception.Message);
         Assert.Equal(2, handler.Requests.Count);
     }
 
+
+    private sealed class ConcurrentTidalMetadataHandler : HttpMessageHandler
+    {
+        readonly object gate = new();
+        int active;
+        public int Peak { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath ==
+                "/v2/userCollectionTracks/me/relationships/items")
+                return Response(new TidalCollectionPage
+                {
+                    Data = Enumerable.Range(1, 9)
+                        .Select(i => new TidalResourceDto
+                        {
+                            Id = "item-" + i, Type = "tracks"
+                        }).ToArray()
+                }, AppJsonContext.Default.TidalCollectionPage);
+
+            Assert.StartsWith("/v2/tracks/", request.RequestUri.AbsolutePath);
+            var current = Interlocked.Increment(ref active);
+            lock (gate) Peak = Math.Max(Peak, current);
+            try
+            {
+                await Task.Delay(30, ct);
+                var id = request.RequestUri.AbsolutePath["/v2/tracks/".Length..];
+                return Response(new TidalTrackDetail
+                {
+                    Data = TidalTrack(id, artistFallback: "Singer", relationship: false)
+                }, AppJsonContext.Default.TidalTrackDetail);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref active);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Tidal_track_details_run_concurrently_up_to_worker_limit()
+    {
+        var handler = new ConcurrentTidalMetadataHandler();
+        var progress = new System.Collections.Concurrent.ConcurrentBag<SyncProgress>();
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 3, progress: progress.Add);
+        var songs = await library.GetFavorites();
+        Assert.Equal(3, handler.Peak);
+        Assert.Equal(9, songs.Count);
+        Assert.Equal("item-1", songs[0].Id);
+        Assert.Equal("item-9", songs[8].Id);
+        Assert.Contains(progress, p => p.Stage == "TIDAL metadata" &&
+            p.Completed == 9 && p.Total == 9);
+    }
+
+    [Fact]
+    public async Task Tidal_null_track_entry_is_ignored_safely()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalTrackPage
+        {
+            Data = [null!]
+        }, AppJsonContext.Default.TidalTrackPage));
+        Assert.Empty(await Tidal(handler).SearchIsrc("USAAA0000001"));
+    }
+
+    [Fact]
+    public async Task Prune_preview_can_run_without_a_progress_listener()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "missing", Type = "tracks" },
+                new TidalResourceDto { Id = "available", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound));
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("available"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1,
+            deleteUnavailable: true, dryRun: true);
+        Assert.Equal("available", Assert.Single(await library.GetFavorites()).Id);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Tidal_metadata_404_can_be_pruned_only_when_explicitly_enabled()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "476318120", Type = "tracks" },
+                new TidalResourceDto { Id = "valid", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"errors":[{"code":"NOT_FOUND"}]}""")
+        });
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("valid"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+        handler.Push(request =>
+        {
+            Assert.Equal(HttpMethod.Delete, request.Method);
+            Assert.Equal("/v2/userCollectionTracks/me/relationships/items",
+                request.RequestUri!.AbsolutePath);
+            Assert.Equal("application/vnd.api+json",
+                request.Content!.Headers.ContentType?.ToString());
+            var body = request.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            var remove = JsonSerializer.Deserialize(body, AppJsonContext.Default.TidalCollectionWriteRequest);
+            Assert.Equal("476318120", Assert.Single(remove!.Data).Id);
+            Assert.Equal("tracks", remove.Data[0].Type);
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        });
+
+        var progress = new List<SyncProgress>();
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1,
+            deleteUnavailable: true, progress: progress.Add);
+        Assert.Equal("valid", Assert.Single(await library.GetFavorites()).Id);
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Contains(progress, p => p.Stage == "TIDAL metadata" &&
+            p.Completed == 2 && p.Total == 2);
+        Assert.Contains(progress, p => p.Stage == "TIDAL cleanup" &&
+            p.Completed == 1 && p.Total == 1);
+    }
+
+    [Fact]
+    public async Task Pruning_dry_run_never_deletes_and_previews_count()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "missing", Type = "tracks" },
+                new TidalResourceDto { Id = "ok", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound));
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("ok"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+
+        var progress = new List<SyncProgress>();
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1, deleteUnavailable: true,
+            dryRun: true, progress: progress.Add);
+        Assert.Equal("ok", Assert.Single(await library.GetFavorites()).Id);
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.DoesNotContain(handler.Requests, request => request.StartsWith("DELETE"));
+        Assert.Contains(progress, p => p.Stage == "TIDAL cleanup preview" &&
+            p.Completed == 1 && p.Total == 1);
+    }
+
+    [Fact]
+    public async Task Missing_track_attributes_are_prunable_but_missing_isrc_is_not()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "without-metadata", Type = "tracks" },
+                new TidalResourceDto { Id = "no-isrc", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = new TidalTrackDto { Id = "without-metadata", Attributes = null }
+        }, AppJsonContext.Default.TidalTrackDetail));
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("no-isrc", isrc: null), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+        handler.Push(request =>
+        {
+            var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            var deletion = JsonSerializer.Deserialize(body, AppJsonContext.Default.TidalCollectionWriteRequest);
+            Assert.Equal("without-metadata", Assert.Single(deletion!.Data).Id);
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        });
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1, deleteUnavailable: true);
+        var song = Assert.Single(await library.GetFavorites());
+        Assert.Equal("no-isrc", song.Id);
+        Assert.Null(song.Isrc);
+        Assert.Equal(4, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Entirely_unavailable_collection_is_not_deleted_even_with_opt_in()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [new TidalResourceDto { Id = "unavailable", Type = "tracks" }]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound));
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1, deleteUnavailable: true);
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => library.GetFavorites());
+        Assert.Contains("refusing to treat the collection as empty", error.Message);
+        Assert.DoesNotContain(handler.Requests, request => request.StartsWith("DELETE"));
+    }
+
+    [Fact]
+    public async Task Cleanup_delete_failure_is_not_silently_ignored()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "missing", Type = "tracks" },
+                new TidalResourceDto { Id = "valid", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound));
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("valid"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.Forbidden)
+        {
+            Content = new StringContent("collection.write permission denied")
+        });
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1, deleteUnavailable: true);
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => library.GetFavorites());
+        Assert.Equal(HttpStatusCode.Forbidden, ex.StatusCode);
+        Assert.Contains("DELETE", ex.Message);
+    }
+
+    [Fact]
+    public async Task Empty_tidal_collection_reports_zero_metadata_processed()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage(), AppJsonContext.Default.TidalCollectionPage));
+        var updates = new List<SyncProgress>();
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), progress: updates.Add);
+        Assert.Empty(await library.GetFavorites());
+        Assert.Contains(updates, p => p.Stage == "TIDAL metadata" &&
+            p.Completed == 0 && p.Total == 0);
+    }
 
 }

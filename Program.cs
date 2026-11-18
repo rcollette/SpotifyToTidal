@@ -15,6 +15,11 @@ public sealed record OAuthToken(string AccessToken, string? RefreshToken, DateTi
 public sealed class OAuthManager(string dataDirectory, AppSettings settings, HttpClient http,
     Action<string>? browserOpener = null)
 {
+    // Prevent concurrent requests from refreshing the same OAuth token
+    // repeatedly or overwriting newer refresh tokens.
+    readonly SemaphoreSlim spotifyTokenGate = new(1, 1);
+    readonly SemaphoreSlim tidalTokenGate = new(1, 1);
+
     string TokenPath(string service) => Path.Combine(dataDirectory, service + "-token.json");
     string ClientId(string service) => service == "spotify" ? settings.SpotifyClientId : settings.TidalClientId;
     string Redirect(string service) => service == "spotify" ? settings.SpotifyRedirectUri : settings.TidalRedirectUri;
@@ -92,22 +97,32 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
 
     public async Task<string> AccessToken(string service)
     {
-        if (!File.Exists(TokenPath(service)))
-            throw new InvalidOperationException("Run 'login " + service + "' first.");
-        var token = JsonSerializer.Deserialize<OAuthToken>(
-            await File.ReadAllTextAsync(TokenPath(service)), AppJsonContext.Default.OAuthToken)!;
-        if (token.ExpiresAt <= DateTimeOffset.UtcNow)
+        var gate = service == "spotify" ? spotifyTokenGate : tidalTokenGate;
+        await gate.WaitAsync();
+        try
         {
-            if (token.RefreshToken is null)
-                throw new InvalidOperationException(service + " token expired; login again.");
-            token = await Exchange(service, new()
+            if (!File.Exists(TokenPath(service)))
+                throw new InvalidOperationException("Run 'login " + service + "' first.");
+            var token = JsonSerializer.Deserialize<OAuthToken>(
+                await File.ReadAllTextAsync(TokenPath(service)), AppJsonContext.Default.OAuthToken)!;
+            if (token.ExpiresAt <= DateTimeOffset.UtcNow)
             {
-                ["grant_type"] = "refresh_token", ["client_id"] = ClientId(service),
-                ["refresh_token"] = token.RefreshToken
-            }, token.RefreshToken);
+                if (token.RefreshToken is null)
+                    throw new InvalidOperationException(service + " token expired; login again.");
+                token = await Exchange(service, new()
+                {
+                    ["grant_type"] = "refresh_token", ["client_id"] = ClientId(service),
+                    ["refresh_token"] = token.RefreshToken
+                }, token.RefreshToken);
+            }
+            return token.AccessToken;
         }
-        return token.AccessToken;
+        finally
+        {
+            gate.Release();
+        }
     }
+
 }
 
 public static class Program
@@ -145,7 +160,8 @@ public static class Program
             }
             if (args[0] != "sync") { Help(); return 2; }
 
-            bool dryRun = false;
+            bool dryRun = false, pruneUnavailableTidal = false;
+            int maxConcurrency = 5;
             SyncDirection direction = SyncDirection.Both;
             for (int i = 1; i < args.Length; i++)
             {
@@ -160,14 +176,28 @@ public static class Program
                         _ => throw new ArgumentException("Invalid direction")
                     };
                 }
+                else if (args[i] == "--prune-unavailable-tidal") pruneUnavailableTidal = true;
+                else if (args[i] == "--max-concurrency" && i + 1 < args.Length)
+                {
+                    if (!int.TryParse(args[++i], out maxConcurrency) ||
+                        maxConcurrency is < 1 or > 32)
+                        throw new ArgumentException("--max-concurrency must be between 1 and 32.");
+                }
                 else throw new ArgumentException("Unknown sync argument " + args[i]);
             }
 
+            var coordinator = new SyncConsoleProgress(Console.Out);
+
+            Console.WriteLine("Synchronizing with up to " + maxConcurrency +
+                " concurrent operations per service.");
             var spotify = new SpotifyLibrary(http, () => auth.AccessToken("spotify"),
                 new Uri("https://api.spotify.com/"));
             var tidal = new TidalLibrary(http, () => auth.AccessToken("tidal"),
-                new Uri("https://openapi.tidal.com/"), settings.CountryCode);
-            var results = await SyncEngine.Run(spotify, tidal, direction, dryRun);
+                new Uri("https://openapi.tidal.com/"), settings.CountryCode,
+                maxConcurrency: maxConcurrency, deleteUnavailable: pruneUnavailableTidal,
+                dryRun: dryRun, progress: coordinator.Report);
+            var results = await SyncEngine.Run(spotify, tidal, direction, dryRun,
+                maxConcurrency: maxConcurrency, progress: coordinator.Report);
             string path = Path.Combine(dataDir, "report.csv");
             await File.WriteAllTextAsync(path, CsvReport.Serialize(results));
             foreach (var group in results.GroupBy(r => (r.Direction, r.Status)))

@@ -131,4 +131,35 @@ public sealed class CliAcceptanceTests
         Assert.Contains("error", report);
     }
 
+    [Fact]
+    public async Task Sync_cli_supports_bounded_workers_and_opt_in_prune_preview()
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path);
+        using var http = new HttpClient(new FakeMusicApi());
+        Assert.Equal(0, await Program.Run(
+            ["sync", "--dry-run", "--max-concurrency", "2", "--prune-unavailable-tidal"],
+            path, http));
+        Assert.True(File.Exists(Path.Combine(path, "report.csv")));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("33")]
+    [InlineData("invalid")]
+    public async Task Sync_rejects_out_of_bounds_worker_limits(string value)
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path);
+        Assert.Equal(1, await Program.Run(["sync", "--max-concurrency", value], path));
+    }
+
+    [Fact]
+    public async Task Sync_rejects_missing_worker_limit()
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path);
+        Assert.Equal(1, await Program.Run(["sync", "--max-concurrency"], path));
+    }
+
 }
