@@ -186,25 +186,7 @@ public static class Program
                 else throw new ArgumentException("Unknown sync argument " + args[i]);
             }
 
-            // All workers report through this one synchronized console
-            // coordinator. Limit progress output to ~5% increments, plus
-            // the first track and final total for each stage.
-            var outputLock = new object();
-            var lastReported = new Dictionary<string, int>(StringComparer.Ordinal);
-            void Report(SyncProgress update)
-            {
-                lock (outputLock)
-                {
-                    var prior = lastReported.GetValueOrDefault(update.Stage, -1);
-                    if (update.Completed <= prior) return;
-                    var step = Math.Max(1, update.Total / 20);
-                    if (update.Completed != 0 && update.Completed != update.Total &&
-                        update.Completed != 1 && update.Completed - prior < step) return;
-                    Console.WriteLine(update.Stage + ": " + update.Completed + "/" +
-                        update.Total + " tracks processed");
-                    lastReported[update.Stage] = update.Completed;
-                }
-            }
+            var coordinator = new SyncConsoleProgress(Console.Out);
 
             Console.WriteLine("Synchronizing with up to " + maxConcurrency +
                 " concurrent operations per service.");
@@ -213,9 +195,9 @@ public static class Program
             var tidal = new TidalLibrary(http, () => auth.AccessToken("tidal"),
                 new Uri("https://openapi.tidal.com/"), settings.CountryCode,
                 maxConcurrency: maxConcurrency, deleteUnavailable: pruneUnavailableTidal,
-                dryRun: dryRun, progress: Report);
+                dryRun: dryRun, progress: coordinator.Report);
             var results = await SyncEngine.Run(spotify, tidal, direction, dryRun,
-                maxConcurrency: maxConcurrency, progress: Report);
+                maxConcurrency: maxConcurrency, progress: coordinator.Report);
             string path = Path.Combine(dataDir, "report.csv");
             await File.WriteAllTextAsync(path, CsvReport.Serialize(results));
             foreach (var group in results.GroupBy(r => (r.Direction, r.Status)))
