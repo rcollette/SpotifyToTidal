@@ -48,7 +48,7 @@ public sealed class HttpAdapterTests
             new Uri("https://spotify.test/"), wait);
     private static TidalLibrary Tidal(ScriptedHandler h, Func<TimeSpan, CancellationToken, Task>? wait = null) =>
         new(new HttpClient(h), () => Task.FromResult("test-access"),
-            new Uri("https://tidal.test/"), "US", wait);
+            new Uri("https://tidal.test/"), "US", wait, maxConcurrency: 1);
 
     [Fact]
     public async Task Spotify_saved_tracks_are_paginated_deduplicated_and_skip_invalid_rows()
@@ -119,13 +119,13 @@ public sealed class HttpAdapterTests
             Data = [new TidalResourceDto { Id = null }, new TidalResourceDto { Id = "tid-1" }],
             Links = new TidalLinksDto { Next = "/v2/favorites?page=2" }
         }, AppJsonContext.Default.TidalCollectionPage));
-        h.Push(Response(new TidalTrackDetail {
-            Data = TidalTrack("tid-1"), Included = [TidalArtist()]
-        }, AppJsonContext.Default.TidalTrackDetail));
         h.Push(Response(new TidalCollectionPage {
             Data = [new TidalResourceDto { Id = "tid-1" }, new TidalResourceDto { Id = "tid-2" }],
             Links = new TidalLinksDto { Next = "/v2/favorites?page=2" }
         }, AppJsonContext.Default.TidalCollectionPage));
+        h.Push(Response(new TidalTrackDetail {
+            Data = TidalTrack("tid-1"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
         h.Push(Response(new TidalTrackDetail {
             Data = TidalTrack("tid-1"), Included = []
         }, AppJsonContext.Default.TidalTrackDetail));
@@ -569,7 +569,7 @@ public sealed class HttpAdapterTests
             Content = new StringContent("""{"errors":[{"code":"NOT_FOUND"}]}""")
         });
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
-        Assert.Contains("Every TIDAL favorite track detail request returned 404", exception.Message);
+        Assert.Contains("Every TIDAL favorite track has missing or unavailable metadata", exception.Message);
         Assert.Contains("config.json countryCode", exception.Message);
         Assert.DoesNotContain("ask TIDAL developer support", exception.Message);
         Assert.Equal(2, handler.Requests.Count);
