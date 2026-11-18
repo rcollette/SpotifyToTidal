@@ -272,7 +272,7 @@ public sealed class HttpAdapterTests
         {
             Console.SetError(original);
         }
-        Assert.Equal([TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4)], delays);
+        Assert.Equal(new[] { TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4) }, delays);
         var log = output.ToString();
         Assert.Contains("Spotify HTTP 429 rate limited GET /v1/search", log);
         Assert.Contains("attempt 1/5", log);
@@ -308,7 +308,7 @@ public sealed class HttpAdapterTests
             Console.SetError(original);
         }
         Assert.Equal(5, handler.Requests.Count);
-        Assert.Equal([2.0, 4.0, 8.0, 16.0], waits.Select(x => x.TotalSeconds));
+        Assert.Equal(new[] { 2.0, 4.0, 8.0, 16.0 }, waits.Select(x => x.TotalSeconds));
         var log = output.ToString();
         Assert.Equal(5, log.Split("HTTP 429", StringSplitOptions.None).Length - 1);
         Assert.Contains("attempt 5/5", log);
