@@ -114,14 +114,25 @@ Each `login` opens a browser for authorization. If the browser does not open, vi
 | `sync --direction tidal-to-spotify` | TIDAL → Spotify only |
 | `sync --direction both` | Both directions (default) |
 | `sync --dry-run` | Preview without adding favorites |
-| `sync --max-concurrency 5` | Limit concurrent per-service operations to 5 (1–32; default 5) |
+| `sync --max-concurrency N` | Set maximum simultaneous operations per service (1–32; default 5) |
 | `sync --prune-unavailable-tidal` | Also remove TIDAL favorites whose individual track metadata cannot be retrieved; **destructive, opt-in** |
 | `sync --dry-run --prune-unavailable-tidal` | Preview cleanup candidates without deleting them |
 | `report` | Print the last CSV report's location |
+| `--help` or `help` | Show command help, including sync flags; `sync --help` also works |
 
-**Progress:** The console reports how many Spotify and TIDAL favorites have been loaded, the number of TIDAL track metadata lookups completed out of the collection total, and progress in each sync direction. Requests run concurrently with a bounded worker limit; pagination requests that depend on a cursor remain ordered.
+**Progress and performance:** The console reports how many Spotify and TIDAL favorites have been loaded, the number of TIDAL metadata lookups completed out of the collection total, and progress in each sync direction. The two directions run concurrently with bounded workers. Existing favorites are matched using in-memory indexes, duplicate ISRC catalog searches share a lookup within each direction, and TIDAL metadata is requested in batches of up to 20 tracks. Pages that depend on a cursor remain ordered.
 
-**TIDAL cleanup safety:** `--prune-unavailable-tidal` deletes only favorites whose individual metadata endpoint returns HTTP 404 or whose returned track has no metadata attributes. It does **not** delete songs simply because they lack an ISRC or exact match. The application first reads the complete favorites collection before attempting removals; it refuses bulk cleanup when every track is unavailable (which could indicate missing API permissions). Run `sync --dry-run --prune-unavailable-tidal` first and review the console. Deletion requires TIDAL collection write access and cannot be undone by the application.
+**Cleanup examples (macOS/Linux):**
+
+```sh
+# Preview TIDAL favorites that would be deleted; do not change either library
+./SpotifyToTidal sync --dry-run --prune-unavailable-tidal
+
+# Delete confirmed unavailable TIDAL favorites (and perform normal sync)
+./SpotifyToTidal sync --prune-unavailable-tidal
+```
+
+**TIDAL cleanup safety:** `--prune-unavailable-tidal` deletes only favorites confirmed by an individual metadata request to return HTTP 404 or to have no track metadata attributes. Missing or incomplete batch results are checked individually before any deletion is considered. It does **not** delete songs simply because they lack an ISRC or exact match. The application first reads the complete favorites collection before attempting removals; it refuses bulk cleanup when every track is unavailable (which could indicate missing API permissions). Run `sync --dry-run --prune-unavailable-tidal` first and review the console. Deletion requires TIDAL collection write access and cannot be undone by the application.
 
 The report is saved as `~/.spotify-to-tidal/report.csv` (macOS/Linux) or `%USERPROFILE%\.spotify-to-tidal\report.csv` (Windows). It identifies added, existing, unmatched, and failed tracks.
 
@@ -130,15 +141,15 @@ Apart from explicitly requested TIDAL cleanup, the tool never removes existing f
 
 ## Troubleshooting TIDAL 404 errors
 
-If `sync --dry-run` fails with **TIDAL returned 404**, first check the **HTTP method and URL** in the error. A 404 is not proof that the address is invalid: [TIDAL's API documentation](https://tidal-music.github.io/tidal-api-reference/) says that a resource unavailable to your application can appear not to exist.
+If a sync reports **TIDAL returned 404**, first check the **HTTP method and URL** in the error. A 404 is not proof that the address is invalid: [TIDAL's API documentation](https://tidal-music.github.io/tidal-api-reference/) says that a resource unavailable to your application can appear not to exist.
 
 - **`GET /v2/userCollectionTracks/me/relationships/items`**: Verify that your TIDAL developer app has permission for the `collection.read` scope, then run `SpotifyToTidal login tidal` again (or `./SpotifyToTidal login tidal` on macOS/Linux). If it still responds with 404, TIDAL may not have enabled track-collection access for your app; contact TIDAL developer support.
-- **`GET /v2/tracks/<id>`**: The individual track may not be available or visible to your account in the configured market. Note the HTTP method and path when reporting this issue.
+- **`GET /v2/tracks/<id>`**: The individual track may not be available or visible in your configured market. An isolated 404 is skipped with a warning; the app refuses to treat the whole collection as empty if every metadata lookup fails. Note the HTTP method and path when reporting this issue.
 
 Do **not** share access tokens, refresh tokens, or authorization URLs from your terminal output.
 
 ---
 
-**Want to build or contribute to the application?** See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+**Want to build or contribute to the application?** See **[CONTRIBUTING.md](https://github.com/rcollette/SpotifyToTidal/blob/main/CONTRIBUTING.md)**.
 
 This project is not affiliated with Spotify or TIDAL.
