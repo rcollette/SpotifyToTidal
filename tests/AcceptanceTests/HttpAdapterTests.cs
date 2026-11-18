@@ -509,6 +509,54 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
+    public async Task Tidal_skips_one_retired_favorite_and_continues_loading_valid_tracks()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "476318120", Type = "tracks" },
+                new TidalResourceDto { Id = "still-available", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"errors":[{"code":"NOT_FOUND","detail":"Resource not found"}]}""")
+        });
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("still-available"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+
+        var song = Assert.Single(await Tidal(handler).GetFavorites());
+        Assert.Equal("still-available", song.Id);
+        Assert.Equal("Singer", song.Artist);
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Contains("GET https://tidal.test/v2/tracks/476318120?countryCode=US",
+            handler.Requests[1]);
+        Assert.Contains("GET https://tidal.test/v2/tracks/still-available?countryCode=US",
+            handler.Requests[2]);
+    }
+
+    [Fact]
+    public async Task Tidal_track_detail_forbidden_still_aborts_collection_read()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [new TidalResourceDto { Id = "blocked", Type = "tracks" }]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.Forbidden)
+        {
+            Content = new StringContent("catalog access denied")
+        });
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
+        Assert.Equal(HttpStatusCode.Forbidden, exception.StatusCode);
+        Assert.Contains("GET https://tidal.test/v2/tracks/blocked", exception.Message);
+    }
+
+    [Fact]
     public async Task Tidal_track_detail_404_identifies_track_request_without_misdiagnosing_collection_scope()
     {
         var handler = new ScriptedHandler();
@@ -521,9 +569,10 @@ public sealed class HttpAdapterTests
             Content = new StringContent("""{"errors":[{"code":"NOT_FOUND"}]}""")
         });
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() => Tidal(handler).GetFavorites());
-        Assert.Equal(HttpStatusCode.NotFound, exception.StatusCode);
-        Assert.Contains("GET https://tidal.test/v2/tracks/not-available", exception.Message);
+        Assert.Contains("Every TIDAL favorite track detail request returned 404", exception.Message);
+        Assert.Contains("config.json countryCode", exception.Message);
         Assert.DoesNotContain("ask TIDAL developer support", exception.Message);
+        Assert.Equal(2, handler.Requests.Count);
     }
 
 
