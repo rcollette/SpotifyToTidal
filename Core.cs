@@ -19,6 +19,31 @@ public enum SyncDirection { Both, SpotifyToTidal, TidalToSpotify }
 
 public sealed record SyncProgress(string Stage, int Completed, int Total);
 
+/// <summary>
+/// Single synchronized owner of console progress output. Worker notifications
+/// may arrive in any order; printed counts never move backwards or interleave.
+/// </summary>
+public sealed class SyncConsoleProgress(TextWriter output)
+{
+    readonly object gate = new();
+    readonly Dictionary<string, int> lastReported = new(StringComparer.Ordinal);
+
+    public void Report(SyncProgress update)
+    {
+        lock (gate)
+        {
+            var prior = lastReported.GetValueOrDefault(update.Stage, -1);
+            if (update.Completed <= prior) return;
+            var interval = Math.Max(1, update.Total / 20);
+            if (update.Completed != 0 && update.Completed != update.Total &&
+                update.Completed != 1 && update.Completed - prior < interval) return;
+            output.WriteLine(update.Stage + ": " + update.Completed + "/" +
+                update.Total + " tracks processed");
+            lastReported[update.Stage] = update.Completed;
+        }
+    }
+}
+
 public static class TrackMatcher
 {
     public static string Normalize(string? text)
