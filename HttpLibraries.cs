@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -113,7 +114,9 @@ public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Ur
 }
 
 public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl,
-    string countryCode = "US", Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
+    string countryCode = "US", Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
+    int maxConcurrency = 5, bool deleteUnavailable = false, bool dryRun = false,
+    Action<SyncProgress>? progress = null)
     : HttpTrackLibrary(http, token, baseUrl, "application/vnd.api+json", retryDelay)
 {
     public override string Name => "TIDAL";
@@ -148,10 +151,9 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
 
     public override async Task<IReadOnlyList<Track>> GetFavorites(CancellationToken ct = default)
     {
-        List<Track> tracks = [];
-        int missingTracks = 0, retrievedTracks = 0;
-        // The user-collection relationship endpoint has no countryCode parameter.
-        // Country context is applied when hydrating individual track metadata.
+        // Enumerate the complete collection before hydrating or deleting it:
+        // mutating a cursor-paginated collection during enumeration could skip IDs.
+        List<string> ids = [];
         string? next = "/v2/userCollectionTracks/me/relationships/items";
         HashSet<string> pages = [];
         while (next is not null && pages.Add(next))
@@ -164,45 +166,105 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
             }
             catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
             {
-                // TIDAL may deliberately return 404 for resources unavailable to an app.
                 throw new HttpRequestException(
                     ex.Message + " Check that your TIDAL developer app permits collection.read, " +
                     "then run 'login tidal' to authorize the new scope. If the collection endpoint " +
                     "still returns 404, ask TIDAL developer support whether track-collection " +
                     "access is enabled for your application.", ex, ex.StatusCode);
             }
-            foreach (var entry in page.Data)
+            foreach (var item in page.Data)
+                if (item.Id is not null) ids.Add(item.Id);
+            next = NextPage(page.Links?.Next, next);
+        }
+
+        var trackIds = ids.Distinct(StringComparer.Ordinal).ToArray();
+        var tracks = new Track?[trackIds.Length];
+        var missing = new ConcurrentQueue<string>();
+        int resolved = 0, processed = 0;
+        await Parallel.ForEachAsync(Enumerable.Range(0, trackIds.Length),
+            new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+            async (index, token) =>
             {
-                if (entry.Id is null) continue;
-                TidalTrackDetail detail;
+                var id = trackIds[index];
                 try
                 {
-                    detail = await Request(HttpMethod.Get, "/v2/tracks/" + Escape(entry.Id) +
+                    var detail = await Request(HttpMethod.Get, "/v2/tracks/" + Escape(id) +
                         "?countryCode=" + Escape(country) + "&include=artists",
-                        AppJsonContext.Default.TidalTrackDetail, ct: ct);
+                        AppJsonContext.Default.TidalTrackDetail, ct: token);
+                    // Missing attributes are not evidence of a usable recording.
+                    // Do not prune merely because a valid track lacks an ISRC.
+                    if (detail.Data?.Attributes is null)
+                    {
+                        missing.Enqueue(id);
+                        Console.Error.WriteLine("Warning: TIDAL favorite " + id +
+                            " has no track metadata; skipped.");
+                    }
+                    else
+                    {
+                        Interlocked.Increment(ref resolved);
+                        tracks[index] = Parse(detail.Data, detail.Included);
+                    }
                 }
                 catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
                 {
-                    // TIDAL keeps original favorites IDs even when a recording
-                    // disappears from a country's catalogue. Do not fail an
-                    // otherwise valid collection read because one track is gone.
-                    missingTracks++;
-                    Console.Error.WriteLine("Warning: TIDAL favorite track " + entry.Id +
+                    missing.Enqueue(id);
+                    Console.Error.WriteLine("Warning: TIDAL favorite track " + id +
                         " returned 404 in " + country + "; skipping unavailable metadata.");
-                    continue;
                 }
-                retrievedTracks++;
-                if (Parse(detail.Data, detail.Included) is { } song)
-                    tracks.Add(song);
-            }
-            next = NextPage(page.Links?.Next, next);
-        }
-        if (missingTracks > 0 && retrievedTracks == 0)
+                finally
+                {
+                    progress?.Invoke(new SyncProgress("TIDAL metadata",
+                        Interlocked.Increment(ref processed), trackIds.Length));
+                }
+            });
+
+        if (trackIds.Length == 0)
+            progress?.Invoke(new SyncProgress("TIDAL metadata", 0, 0));
+
+        // If an entire collection appears unavailable, stop: incorrect scopes or
+        // a service-side problem must NEVER trigger a mass deletion.
+        if (!missing.IsEmpty && resolved == 0)
             throw new HttpRequestException(
-                "Every TIDAL favorite track detail request returned 404 (" + missingTracks +
-                " tracks). Check the TIDAL app's catalog access and config.json countryCode; " +
-                "cannot safely treat these favorites as an empty collection.");
-        return tracks.DistinctBy(t => t.Id).ToList();
+                "Every TIDAL favorite track has missing or unavailable metadata (" +
+                missing.Count + " tracks). Check the TIDAL app's catalog access and " +
+                "config.json countryCode; refusing to treat the collection as empty.");
+
+        if (deleteUnavailable && !missing.IsEmpty)
+        {
+            var removals = missing.ToArray();
+            if (dryRun)
+            {
+                Console.WriteLine("Dry run: would remove " + removals.Length +
+                    " TIDAL favorites with unavailable metadata.");
+                progress?.Invoke(new SyncProgress("TIDAL cleanup preview",
+                    removals.Length, removals.Length));
+            }
+            else
+            {
+                int deleted = 0;
+                await Parallel.ForEachAsync(removals,
+                    new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+                    async (id, token) =>
+                    {
+                        await RemoveFavorite(id, token);
+                        Console.WriteLine("Removed unavailable TIDAL favorite " + id);
+                        progress?.Invoke(new SyncProgress("TIDAL cleanup",
+                            Interlocked.Increment(ref deleted), removals.Length));
+                    });
+            }
+        }
+        return tracks.OfType<Track>().ToList();
+    }
+
+    public async Task RemoveFavorite(string trackId, CancellationToken ct = default)
+    {
+        var payload = new TidalCollectionWriteRequest
+        {
+            Data = [new TidalResourceDto { Id = trackId, Type = "tracks" }]
+        };
+        var json = JsonSerializer.Serialize(payload, AppJsonContext.Default.TidalCollectionWriteRequest);
+        _ = await Request(HttpMethod.Delete, "/v2/userCollectionTracks/me/relationships/items",
+            AppJsonContext.Default.EmptyApiResponse, json, ct);
     }
 
     public override async Task<IReadOnlyList<Track>> SearchIsrc(string isrc, CancellationToken ct = default)
