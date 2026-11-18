@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 
 namespace SpotifyToTidal;
@@ -15,6 +16,8 @@ public interface ITrackLibrary
 }
 
 public enum SyncDirection { Both, SpotifyToTidal, TidalToSpotify }
+
+public sealed record SyncProgress(string Stage, int Completed, int Total);
 
 public static class TrackMatcher
 {
@@ -53,72 +56,121 @@ public static class SyncEngine
 {
     public static async Task<IReadOnlyList<SyncResult>> Run(
         ITrackLibrary spotify, ITrackLibrary tidal, SyncDirection direction,
-        bool dryRun, CancellationToken ct = default)
+        bool dryRun, CancellationToken ct = default, int maxConcurrency = 5,
+        Action<SyncProgress>? progress = null)
     {
-        // Snapshot BOTH libraries before any writes. Only additions are supported.
-        var spotifyFavorites = (await spotify.GetFavorites(ct)).ToList();
-        var tidalFavorites = (await tidal.GetFavorites(ct)).ToList();
-        var results = new List<SyncResult>();
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxConcurrency, 1);
+        ct.ThrowIfCancellationRequested();
 
-        async Task Transfer(ITrackLibrary from, ITrackLibrary to, IReadOnlyList<Track> source,
-            List<Track> destination, string name)
+        // Both independent snapshots must complete before any writes begin.
+        // This preserves the pre-sync contents in both directions.
+        var spotifyTask = spotify.GetFavorites(ct);
+        var tidalTask = tidal.GetFavorites(ct);
+        await Task.WhenAll(spotifyTask, tidalTask);
+        var spotifyFavorites = spotifyTask.Result.ToArray();
+        var tidalFavorites = tidalTask.Result.ToArray();
+        progress?.Invoke(new SyncProgress("Spotify favorites", spotifyFavorites.Length, spotifyFavorites.Length));
+        progress?.Invoke(new SyncProgress("TIDAL favorites", tidalFavorites.Length, tidalFavorites.Length));
+
+        async Task<SyncResult[]> Transfer(ITrackLibrary to, IReadOnlyList<Track> source,
+            IReadOnlyList<Track> destination, string name)
         {
-            foreach (var song in source.DistinctBy(s => s.Id))
-            {
-                ct.ThrowIfCancellationRequested();
-                if (destination.Any(existing => TrackMatcher.SameRecording(song, existing)))
-                {
-                    results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                        "already-present", null, "Already favorited"));
-                    continue;
-                }
+            var songs = source.DistinctBy(s => s.Id).ToArray();
+            var rows = new SyncResult[songs.Length];
+            var completed = 0;
+            // A per-ID gate prevents two source records from adding the same
+            // destination favorite concurrently. A failed add is not reserved.
+            var locks = new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
+            var added = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
 
-                if (string.IsNullOrWhiteSpace(song.Isrc))
+            await Parallel.ForEachAsync(Enumerable.Range(0, songs.Length),
+                new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+                async (index, token) =>
                 {
-                    results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                        "unmatched", null, "Missing ISRC; manual review required"));
-                    continue;
-                }
-
-                try
-                {
-                    var (match, note) = TrackMatcher.UniqueMatch(song, await to.SearchIsrc(song.Isrc, ct));
-                    if (match is null)
+                    var song = songs[index];
+                    try
                     {
-                        results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                            "unmatched", null, note));
+                        if (destination.Any(existing => TrackMatcher.SameRecording(song, existing)))
+                        {
+                            rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                "already-present", null, "Already favorited");
+                        }
+                        else if (string.IsNullOrWhiteSpace(song.Isrc))
+                        {
+                            rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                "unmatched", null, "Missing ISRC; manual review required");
+                        }
+                        else
+                        {
+                            var candidates = await to.SearchIsrc(song.Isrc, token);
+                            var (match, note) = TrackMatcher.UniqueMatch(song, candidates);
+                            if (match is null)
+                            {
+                                rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                    "unmatched", null, note);
+                            }
+                            else if (destination.Any(t => t.Id == match.Id))
+                            {
+                                rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                    "already-present", match.Id, "Destination ID already favorited");
+                            }
+                            else if (dryRun)
+                            {
+                                rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                    "would-add", match.Id, note);
+                            }
+                            else
+                            {
+                                var gate = locks.GetOrAdd(match.Id, _ => new SemaphoreSlim(1, 1));
+                                await gate.WaitAsync(token);
+                                try
+                                {
+                                    if (added.ContainsKey(match.Id))
+                                    {
+                                        rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                            "already-present", match.Id, "Destination ID already favorited");
+                                    }
+                                    else
+                                    {
+                                        await to.AddFavorite(match.Id, token);
+                                        added.TryAdd(match.Id, 0);
+                                        rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                                            "added", match.Id, note);
+                                    }
+                                }
+                                finally
+                                {
+                                    gate.Release();
+                                }
+                            }
+                        }
                     }
-                    else if (destination.Any(t => t.Id == match.Id))
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                            "already-present", match.Id, "Destination ID already favorited"));
+                        rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
+                            "error", null, ex.Message);
                     }
-                    else if (dryRun)
+                    finally
                     {
-                        results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                            "would-add", match.Id, note));
+                        progress?.Invoke(new SyncProgress(name,
+                            Interlocked.Increment(ref completed), songs.Length));
                     }
-                    else
-                    {
-                        await to.AddFavorite(match.Id, ct);
-                        destination.Add(match);
-                        results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                            "added", match.Id, note));
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    results.Add(new(name, song.Id, song.Title, song.Artist, song.Isrc,
-                        "error", null, ex.Message));
-                }
-            }
+                });
+            if (songs.Length == 0)
+                progress?.Invoke(new SyncProgress(name, 0, 0));
+            return rows;
         }
 
-        if (direction is SyncDirection.Both or SyncDirection.SpotifyToTidal)
-            await Transfer(spotify, tidal, spotifyFavorites, tidalFavorites, "spotify-to-tidal");
-        if (direction is SyncDirection.Both or SyncDirection.TidalToSpotify)
-            await Transfer(tidal, spotify, tidalFavorites, spotifyFavorites, "tidal-to-spotify");
-        return results;
+        // Directional jobs are independent after the snapshots. Their outputs
+        // are returned in stable source order, even when HTTP calls finish out of order.
+        var outbound = direction is SyncDirection.Both or SyncDirection.SpotifyToTidal
+            ? Transfer(tidal, spotifyFavorites, tidalFavorites, "Spotify → TIDAL")
+            : Task.FromResult(Array.Empty<SyncResult>());
+        var inbound = direction is SyncDirection.Both or SyncDirection.TidalToSpotify
+            ? Transfer(spotify, tidalFavorites, spotifyFavorites, "TIDAL → Spotify")
+            : Task.FromResult(Array.Empty<SyncResult>());
+        await Task.WhenAll(outbound, inbound);
+        return [.. outbound.Result, .. inbound.Result];
     }
 }
 
