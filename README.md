@@ -76,7 +76,9 @@ Edit `config.json` and replace the two Client ID placeholders. Keep the redirect
   "spotifyRedirectUri": "http://127.0.0.1:8765/callback/",
   "tidalRedirectUri": "http://127.0.0.1:8766/callback/",
   "countryCode": "US",
-  "tidalScopes": "collection.read collection.write"
+  "tidalScopes": "collection.read collection.write",
+  "spotifyRequestsPer30Seconds": null,
+  "tidalRequestsPerMinute": null
 }
 ```
 
@@ -114,7 +116,7 @@ Each `login` opens a browser for authorization. If the browser does not open, vi
 | `sync --direction tidal-to-spotify` | TIDAL → Spotify only |
 | `sync --direction both` | Both directions (default) |
 | `sync --dry-run` | Preview without adding favorites |
-| `sync --max-concurrency N` | Set maximum simultaneous operations per service (1–32; default 5) |
+| `sync --max-concurrency N` | Set maximum simultaneous operations per service (1–32; default 5); this is **not** a requests-per-second budget |
 | `sync --prune-unavailable-tidal` | Also remove TIDAL favorites whose individual track metadata cannot be retrieved; **destructive, opt-in** |
 | `sync --dry-run --prune-unavailable-tidal` | Preview cleanup candidates without deleting them |
 | `report` | Print the last CSV report's location |
@@ -139,11 +141,32 @@ The report is saved as `~/.spotify-to-tidal/report.csv` (macOS/Linux) or `%USERP
 Apart from explicitly requested TIDAL cleanup, the tool never removes existing favorites. Tracks are added only when the **ISRC, title, and primary artist** identify a unique match. Missing or ambiguous matches are reported, not added. Catalog access and API permissions can affect results.
 
 
-## HTTP 429 rate limits and retry logging
+## Rate limiting, HTTP 429 retries, and error logging
 
-If Spotify or TIDAL responds with **HTTP 429 (Too Many Requests)**, the application writes a warning to the console's standard error stream. Each warning identifies the provider and request path, current attempt (out of five), chosen backoff method, actual delay, and next attempt. After the fifth 429, it logs that retries are exhausted. Request paths are displayed without query parameters or OAuth tokens.
+The application coordinates API requests **per vendor across concurrent workers**. A worker waits for a shared cooldown established by another worker's HTTP 429, instead of independently retrying while other workers continue to overload the service. Any locally configured sliding-window budget is also enforced before dispatch, regardless of `--max-concurrency`.
 
-The current retry policy is **up to five attempts** (the initial request plus four retries), for 429 and server errors (HTTP 5xx). The backoff uses a **seconds-based `Retry-After` response header when provided**, capped at 60 seconds per delay. Otherwise it waits **2, 4, 8, then 16 seconds** (exponential backoff). The HTTP-date form of `Retry-After` is not currently interpreted; there is no random jitter or shared cross-worker rate-limit pause. Parallel requests may therefore receive and retry 429s independently. A dry run still performs remote catalog searches, so it can also encounter rate limits.
+**Published vendor guidance:**
+
+- [Spotify's rate-limit guide](https://developer.spotify.com/documentation/web-api/concepts/rate-limits) defines a **rolling 30-second window** and normally returns a **Retry-After (seconds)** header with HTTP 429. Spotify does **not** publish one numeric limit that applies to every application: the number varies with quota mode and possibly endpoint.
+- [Spotify's development-mode quota guide](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) describes a separate `429` error containing `"reason": "QUOTA_EXCEEDED"`. This is reported as an **error without retries**, because short exponential waits do not reset that quota.
+- [TIDAL's API reference](https://tidal-music.github.io/tidal-api-reference/) does not specify a universal numeric request budget or one universally guaranteed 429 delay. TIDAL 429 responses are handled according to their `Retry-After` header when present; otherwise the fallback below applies.
+
+**Configurable client-side limits** (set in `~/.spotify-to-tidal/config.json`, optional):
+
+| JSON setting | Meaning | Default |
+| --- | --- | --- |
+| `spotifyRequestsPer30Seconds` | Maximum Spotify requests in any rolling 30 seconds | `null` (no assumed numeric vendor cap) |
+| `tidalRequestsPerMinute` | Maximum TIDAL requests in any rolling 60 seconds | `null` (no assumed numeric vendor cap) |
+
+Set a **positive integer** to apply a local budget. For example, `"spotifyRequestsPer30Seconds": 30` establishes a *user-chosen* limit of 30 Spotify API calls in a rolling 30-second interval. **30 is an example, not a vendor-published limit.** The default `null` still enforces shared reactive cooldowns upon 429s, but no numeric proactive cap can be guaranteed when the vendor does not publish a value. Local budgets cover requests made through the Spotify and TIDAL catalog/collection HTTP adapters; OAuth token requests use separate endpoints.
+
+**Retry behavior:** Requests receiving HTTP 429 or 5xx get up to **five total attempts** (initial request plus four retries). A valid `Retry-After` header in either **delta-seconds or HTTP-date** form is honored in full, including waits beyond 60 seconds. Otherwise:
+
+- HTTP 429 falls back to provider-wide exponential backoff starting at **2 seconds**, then **4, 8, 16, 32, 60 seconds** for successive 429s (60-second *fallback* maximum, **not** a cap on vendor instructions). The backoff counter **resets after any successful API response**.
+- HTTP 5xx falls back to per-request exponential backoff of **2, 4, 8, 16 seconds** across the four retries, honoring `Retry-After` if supplied.
+- Any 429 cooldown is shared among workers for that provider; if multiple 429 responses overlap, the later expiry wins. A configured local request budget remains active after success.
+
+**Console diagnostics:** Every HTTP 429 produces a warning or terminal error showing the provider, HTTP status, method, path, attempt, selected retry strategy, effective wait time, and whether retries remain. All other unsuccessful HTTP responses (including 4xx and 5xx), transport failures, and invalid JSON responses are also logged to standard error; retried 5xx messages include backoff details. Logs omit request query parameters, OAuth tokens, and response bodies. A locally configured budget produces an informational waiting message when it delays a request. The command exits nonzero if an unhandled error prevents sync. A `--dry-run` still invokes the remote APIs and follows the same rules.
 
 ## Troubleshooting TIDAL 404 errors
 

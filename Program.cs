@@ -8,7 +8,8 @@ namespace SpotifyToTidal;
 
 public sealed record AppSettings(string SpotifyClientId, string TidalClientId,
     string SpotifyRedirectUri, string TidalRedirectUri, string CountryCode,
-    string TidalScopes = "collection.read collection.write");
+    string TidalScopes = "collection.read collection.write",
+    int? SpotifyRequestsPer30Seconds = null, int? TidalRequestsPerMinute = null);
 
 public sealed record OAuthToken(string AccessToken, string? RefreshToken, DateTimeOffset ExpiresAt);
 
@@ -142,6 +143,8 @@ public static class Program
                                       Direction (default: both)
           --dry-run                   Preview additions and cleanup; make no changes
           --max-concurrency N         Concurrent operations per service (1-32; default: 5)
+                                      Rate limits are controlled in config.json;
+                                      provider-wide HTTP 429 cooldowns are automatic
           --prune-unavailable-tidal   DELETE TIDAL favorites with unavailable metadata
                                       (destructive; disabled by default)
 
@@ -213,16 +216,29 @@ public static class Program
                 else throw new ArgumentException("Unknown sync argument " + args[i]);
             }
 
+            if (settings.SpotifyRequestsPer30Seconds is <= 0 ||
+                settings.TidalRequestsPerMinute is <= 0)
+                throw new ArgumentException("Configured API request budgets must be positive integers.");
+            var spotifyRate = new ApiRateLimiter("Spotify",
+                settings.SpotifyRequestsPer30Seconds, TimeSpan.FromSeconds(30));
+            var tidalRate = new ApiRateLimiter("TIDAL",
+                settings.TidalRequestsPerMinute, TimeSpan.FromMinutes(1));
             var coordinator = new SyncConsoleProgress(Console.Out);
 
             Console.WriteLine("Synchronizing with up to " + maxConcurrency +
                 " concurrent operations per service.");
+            Console.WriteLine("Local request budgets: Spotify " +
+                (settings.SpotifyRequestsPer30Seconds is { } spotifyBudget
+                    ? spotifyBudget + "/30s" : "not configured (vendor numeric cap unpublished)") +
+                "; TIDAL " +
+                (settings.TidalRequestsPerMinute is { } tidalBudget
+                    ? tidalBudget + "/60s" : "not configured (vendor numeric cap unpublished)") + ".");
             var spotify = new SpotifyLibrary(http, () => auth.AccessToken("spotify"),
-                new Uri("https://api.spotify.com/"));
+                new Uri("https://api.spotify.com/"), rateLimiter: spotifyRate);
             var tidal = new TidalLibrary(http, () => auth.AccessToken("tidal"),
                 new Uri("https://openapi.tidal.com/"), settings.CountryCode,
                 maxConcurrency: maxConcurrency, deleteUnavailable: pruneUnavailableTidal,
-                dryRun: dryRun, progress: coordinator.Report);
+                dryRun: dryRun, progress: coordinator.Report, rateLimiter: tidalRate);
             var results = await SyncEngine.Run(spotify, tidal, direction, dryRun,
                 maxConcurrency: maxConcurrency, progress: coordinator.Report);
             string path = Path.Combine(dataDir, "report.csv");

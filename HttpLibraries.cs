@@ -8,64 +8,168 @@ using System.Text.Json.Serialization.Metadata;
 namespace SpotifyToTidal;
 
 public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> bearerToken,
-    Uri baseUrl, string acceptType,
-    Func<TimeSpan, CancellationToken, Task>? retryDelay = null) : ITrackLibrary
+    Uri baseUrl, string acceptType, string provider,
+    Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
+    ApiRateLimiter? rateLimiter = null) : ITrackLibrary
 {
     protected readonly HttpClient Http = http;
     protected readonly Uri BaseUrl = baseUrl;
+    private readonly ApiRateLimiter throttle =
+        rateLimiter ?? new ApiRateLimiter(provider, null, TimeSpan.FromSeconds(30), retryDelay);
     public abstract string Name { get; }
 
-    // No object payloads or reflection-based serialization: the concrete wire type
-    // must be provided by the compile-time generated JsonSerializerContext.
+    // No reflection-based serialization: the concrete wire type must be
+    // provided by the compile-time generated JsonSerializerContext.
     protected async Task<TResponse> Request<TResponse>(
         HttpMethod method, string path, JsonTypeInfo<TResponse> responseType,
         string? serializedPayload = null, CancellationToken ct = default)
     {
         for (int attempt = 0; ; attempt++)
         {
+            // All concurrent workers using this library share one limiter.
+            await throttle.WaitForTurnAsync(ct);
             using var req = new HttpRequestMessage(method, new Uri(BaseUrl, path));
+            string safePath = req.RequestUri!.AbsolutePath; // Never log query strings or tokens.
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await bearerToken());
             req.Headers.Accept.ParseAdd(acceptType);
             if (serializedPayload is not null)
             {
                 req.Content = new StringContent(serializedPayload, Encoding.UTF8);
-                // JSON:API disallows an implicit "charset=utf-8" media-type parameter.
                 req.Content.Headers.ContentType = new MediaTypeHeaderValue(acceptType);
             }
 
-            using var response = await Http.SendAsync(req, ct);
-            var body = await response.Content.ReadAsStringAsync(ct);
-            if (response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
+            HttpResponseMessage response;
+            try
             {
-                if (attempt == 4)
+                response = await Http.SendAsync(req, ct);
+            }
+            catch (Exception ex) when (ex is HttpRequestException ||
+                (ex is TaskCanceledException && !ct.IsCancellationRequested))
+            {
+                Console.Error.WriteLine(
+                    $"Error: {Name} request {method} {safePath} failed ({ex.GetType().Name}); " +
+                    "request not retried.");
+                throw;
+            }
+
+            using (response)
+            {
+                string body;
+                try
                 {
-                    if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                        Console.Error.WriteLine(
-                            $"Warning: {Name} HTTP 429 rate limited {req.Method} {req.RequestUri!.AbsolutePath} " +
-                            "(attempt 5/5). No more retries after 4 backoff waits; " +
-                            "policy: Retry-After seconds (max 60s), otherwise exponential 2, 4, 8, 16s.");
-                    throw new HttpRequestException($"{Name} returned {(int)response.StatusCode} after retries.");
+                    body = await response.Content.ReadAsStringAsync(ct);
                 }
-                var retryAfter = response.Headers.RetryAfter?.Delta;
-                var retry = retryAfter ?? TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
-                var delay = retry > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : retry;
+                catch (Exception ex) when (ex is HttpRequestException ||
+                    (ex is TaskCanceledException && !ct.IsCancellationRequested))
+                {
+                    Console.Error.WriteLine(
+                        $"Error: {Name} response {method} {safePath} could not be read " +
+                        $"({ex.GetType().Name}); request not retried.");
+                    throw;
+                }
+
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 {
-                    var policy = retryAfter is { } serverDelay
-                        ? $"server Retry-After={serverDelay.TotalSeconds:0.###}s"
-                        : "exponential backoff (2, 4, 8, 16s over successive retries)";
+                    // Spotify's development-mode QUOTA_EXCEEDED is not a
+                    // transient 30-second rate-limit event.
+                    if (Name == "Spotify" && IsSpotifyQuotaExceeded(body))
+                    {
+                        Console.Error.WriteLine(
+                            $"Error: Spotify HTTP 429 QUOTA_EXCEEDED {method} {safePath}; " +
+                            "development-mode quota exhausted; not retrying. " +
+                            "See Spotify Developer Dashboard quota mode.");
+                        throw new HttpRequestException(
+                            "Spotify returned 429 QUOTA_EXCEEDED (development-mode quota); " +
+                            "retrying after a short delay will not clear this quota.",
+                            null, response.StatusCode);
+                    }
+
+                    var (delay, policy) = throttle.Register429(response.Headers.RetryAfter);
+                    if (attempt == 4)
+                    {
+                        Console.Error.WriteLine(
+                            $"Error: {Name} HTTP 429 rate limited {method} {safePath} " +
+                            "(attempt 5/5); retries exhausted after four waits. " +
+                            $"Backoff policy: {policy}; shared cooldown {delay.TotalSeconds:0.###}s.");
+                        throw new HttpRequestException(
+                            $"{Name} returned 429 after retries.", null, response.StatusCode);
+                    }
+
                     Console.Error.WriteLine(
-                        $"Warning: {Name} HTTP 429 rate limited {req.Method} {req.RequestUri!.AbsolutePath} " +
+                        $"Warning: {Name} HTTP 429 rate limited {method} {safePath} " +
                         $"(attempt {attempt + 1}/5); backoff: {policy}; " +
-                        $"waiting {delay.TotalSeconds:0.###}s (60s maximum) before attempt {attempt + 2}/5.");
+                        $"waiting {delay.TotalSeconds:0.###}s (shared across {Name} workers) " +
+                        $"before attempt {attempt + 2}/5.");
+                    await throttle.DelayAsync(delay, ct);
+                    continue;
                 }
-                await (retryDelay ?? Task.Delay)(delay, ct);
-                continue;
+
+                if ((int)response.StatusCode >= 500)
+                {
+                    if (attempt == 4)
+                    {
+                        Console.Error.WriteLine(
+                            $"Error: {Name} HTTP {(int)response.StatusCode} {method} {safePath} " +
+                            "(attempt 5/5); retries exhausted.");
+                        throw new HttpRequestException(
+                            $"{Name} returned {(int)response.StatusCode} after retries.",
+                            null, response.StatusCode);
+                    }
+
+                    var (delay, policy) = ApiRateLimiter.ServerRetry(
+                        response.Headers.RetryAfter, attempt, DateTimeOffset.UtcNow);
+                    Console.Error.WriteLine(
+                        $"Error: {Name} HTTP {(int)response.StatusCode} {method} {safePath} " +
+                        $"(attempt {attempt + 1}/5); retry: {policy}; " +
+                        $"waiting {delay.TotalSeconds:0.###}s before attempt {attempt + 2}/5.");
+                    await throttle.DelayAsync(delay, ct);
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.Error.WriteLine(
+                        $"Error: {Name} HTTP {(int)response.StatusCode} {method} {safePath}; " +
+                        "non-retryable response.");
+                    throw new HttpRequestException(
+                        $"{Name} returned {(int)response.StatusCode} for {method} {req.RequestUri}: " +
+                        body[..Math.Min(body.Length, 400)], null, response.StatusCode);
+                }
+
+                // Success resets the shared exponential 429 sequence, not the
+                // configured local sliding-window request history.
+                throttle.RecordSuccess();
+                try
+                {
+                    return JsonSerializer.Deserialize(
+                        string.IsNullOrWhiteSpace(body) ? "{}" : body, responseType)
+                        ?? throw new JsonException($"{Name} returned null JSON.");
+                }
+                catch (JsonException)
+                {
+                    Console.Error.WriteLine(
+                        $"Error: {Name} invalid JSON response to {method} {safePath}; not retrying.");
+                    throw;
+                }
             }
-            if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"{Name} returned {(int)response.StatusCode} for {req.Method} {req.RequestUri}: {body[..Math.Min(body.Length, 400)]}", null, response.StatusCode);
-            return JsonSerializer.Deserialize(string.IsNullOrWhiteSpace(body) ? "{}" : body, responseType)
-                ?? throw new JsonException($"{Name} returned null JSON.");
+        }
+    }
+
+    private static bool IsSpotifyQuotaExceeded(string body)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            return json.RootElement.ValueKind == JsonValueKind.Object &&
+                json.RootElement.TryGetProperty("error", out var error) &&
+                error.ValueKind == JsonValueKind.Object &&
+                error.TryGetProperty("reason", out var reason) &&
+                reason.ValueKind == JsonValueKind.String &&
+                string.Equals(reason.GetString(), "QUOTA_EXCEEDED", StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
@@ -76,8 +180,10 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
 }
 
 public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl,
-    Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
-    : HttpTrackLibrary(http, token, baseUrl, "application/json", retryDelay)
+    Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
+    ApiRateLimiter? rateLimiter = null)
+    : HttpTrackLibrary(http, token, baseUrl, "application/json", "Spotify",
+        retryDelay, rateLimiter)
 {
     public override string Name => "Spotify";
 
@@ -134,8 +240,9 @@ public sealed class SpotifyLibrary(HttpClient http, Func<Task<string>> token, Ur
 public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri baseUrl,
     string countryCode = "US", Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
     int maxConcurrency = 5, bool deleteUnavailable = false, bool dryRun = false,
-    Action<SyncProgress>? progress = null)
-    : HttpTrackLibrary(http, token, baseUrl, "application/vnd.api+json", retryDelay)
+    Action<SyncProgress>? progress = null, ApiRateLimiter? rateLimiter = null)
+    : HttpTrackLibrary(http, token, baseUrl, "application/vnd.api+json", "TIDAL",
+        retryDelay, rateLimiter)
 {
     public override string Name => "TIDAL";
     readonly string country = countryCode;
