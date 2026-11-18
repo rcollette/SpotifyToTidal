@@ -41,7 +41,7 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
             HttpResponseMessage response;
             try
             {
-                response = await Http.SendAsync(req, ct);
+                response = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
             }
             catch (Exception ex) when (ex is HttpRequestException ||
                 (ex is TaskCanceledException && !ct.IsCancellationRequested))
