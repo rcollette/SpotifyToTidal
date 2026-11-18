@@ -139,6 +139,12 @@ The report is saved as `~/.spotify-to-tidal/report.csv` (macOS/Linux) or `%USERP
 Apart from explicitly requested TIDAL cleanup, the tool never removes existing favorites. Tracks are added only when the **ISRC, title, and primary artist** identify a unique match. Missing or ambiguous matches are reported, not added. Catalog access and API permissions can affect results.
 
 
+## HTTP 429 rate limits and retry logging
+
+If Spotify or TIDAL responds with **HTTP 429 (Too Many Requests)**, the application writes a warning to the console's standard error stream. Each warning identifies the provider and request path, current attempt (out of five), chosen backoff method, actual delay, and next attempt. After the fifth 429, it logs that retries are exhausted. Request paths are displayed without query parameters or OAuth tokens.
+
+The current retry policy is **up to five attempts** (the initial request plus four retries), for 429 and server errors (HTTP 5xx). The backoff uses a **seconds-based `Retry-After` response header when provided**, capped at 60 seconds per delay. Otherwise it waits **2, 4, 8, then 16 seconds** (exponential backoff). The HTTP-date form of `Retry-After` is not currently interpreted; there is no random jitter or shared cross-worker rate-limit pause. Parallel requests may therefore receive and retry 429s independently. A dry run still performs remote catalog searches, so it can also encounter rate limits.
+
 ## Troubleshooting TIDAL 404 errors
 
 If a sync reports **TIDAL returned 404**, first check the **HTTP method and URL** in the error. A 404 is not proof that the address is invalid: [TIDAL's API documentation](https://tidal-music.github.io/tidal-api-reference/) says that a resource unavailable to your application can appear not to exist.
