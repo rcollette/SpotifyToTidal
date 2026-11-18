@@ -38,10 +38,28 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
             if (response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
             {
                 if (attempt == 4)
+                {
+                    if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                        Console.Error.WriteLine(
+                            $"Warning: {Name} HTTP 429 rate limited {req.Method} {req.RequestUri!.AbsolutePath} " +
+                            "(attempt 5/5). No more retries after 4 backoff waits; " +
+                            "policy: Retry-After seconds (max 60s), otherwise exponential 2, 4, 8, 16s.");
                     throw new HttpRequestException($"{Name} returned {(int)response.StatusCode} after retries.");
-                var retry = response.Headers.RetryAfter?.Delta ??
-                    TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
-                await (retryDelay ?? Task.Delay)(retry > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : retry, ct);
+                }
+                var retryAfter = response.Headers.RetryAfter?.Delta;
+                var retry = retryAfter ?? TimeSpan.FromSeconds(Math.Pow(2, attempt + 1));
+                var delay = retry > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : retry;
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    var policy = retryAfter is { } serverDelay
+                        ? $"server Retry-After={serverDelay.TotalSeconds:0.###}s"
+                        : "exponential backoff (2, 4, 8, 16s over successive retries)";
+                    Console.Error.WriteLine(
+                        $"Warning: {Name} HTTP 429 rate limited {req.Method} {req.RequestUri!.AbsolutePath} " +
+                        $"(attempt {attempt + 1}/5); backoff: {policy}; " +
+                        $"waiting {delay.TotalSeconds:0.###}s (60s maximum) before attempt {attempt + 2}/5.");
+                }
+                await (retryDelay ?? Task.Delay)(delay, ct);
                 continue;
             }
             if (!response.IsSuccessStatusCode)
