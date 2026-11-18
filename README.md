@@ -1,6 +1,6 @@
 # SpotifyToTidal
 
-Synchronize **Spotify Liked Songs** and **TIDAL Favorite Tracks** in either direction, or both ways. SpotifyToTidal only **adds** favorites; it never removes any. Use a dry run to preview changes before syncing.
+Synchronize **Spotify Liked Songs** and **TIDAL Favorite Tracks** in either direction, or both ways. SpotifyToTidal **only adds** favorites by default. An explicit optional cleanup flag can remove TIDAL favorites whose track metadata is unavailable. Use a dry run to preview changes before syncing.
 
 Runs on Windows, macOS (Apple Silicon or Intel), and Linux as a command-line application.
 
@@ -114,11 +114,18 @@ Each `login` opens a browser for authorization. If the browser does not open, vi
 | `sync --direction tidal-to-spotify` | TIDAL → Spotify only |
 | `sync --direction both` | Both directions (default) |
 | `sync --dry-run` | Preview without adding favorites |
+| `sync --max-concurrency 5` | Limit concurrent per-service operations to 5 (1–32; default 5) |
+| `sync --prune-unavailable-tidal` | Also remove TIDAL favorites whose individual track metadata cannot be retrieved; **destructive, opt-in** |
+| `sync --dry-run --prune-unavailable-tidal` | Preview cleanup candidates without deleting them |
 | `report` | Print the last CSV report's location |
+
+**Progress:** The console reports how many Spotify and TIDAL favorites have been loaded, the number of TIDAL track metadata lookups completed out of the collection total, and progress in each sync direction. Requests run concurrently with a bounded worker limit; pagination requests that depend on a cursor remain ordered.
+
+**TIDAL cleanup safety:** `--prune-unavailable-tidal` deletes only favorites whose individual metadata endpoint returns HTTP 404 or whose returned track has no metadata attributes. It does **not** delete songs simply because they lack an ISRC or exact match. The application first reads the complete favorites collection before attempting removals; it refuses bulk cleanup when every track is unavailable (which could indicate missing API permissions). Run `sync --dry-run --prune-unavailable-tidal` first and review the console. Deletion requires TIDAL collection write access and cannot be undone by the application.
 
 The report is saved as `~/.spotify-to-tidal/report.csv` (macOS/Linux) or `%USERPROFILE%\.spotify-to-tidal\report.csv` (Windows). It identifies added, existing, unmatched, and failed tracks.
 
-Tracks are added only when the **ISRC, title, and primary artist** identify a unique match. Missing or ambiguous matches are reported, not added. Catalog access and API permissions can affect results.
+Apart from explicitly requested TIDAL cleanup, the tool never removes existing favorites. Tracks are added only when the **ISRC, title, and primary artist** identify a unique match. Missing or ambiguous matches are reported, not added. Catalog access and API permissions can affect results.
 
 
 ## Troubleshooting TIDAL 404 errors
