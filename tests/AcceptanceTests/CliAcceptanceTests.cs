@@ -37,7 +37,7 @@ public sealed class CliAcceptanceTests
     public async Task Help_shows_all_supported_sync_options_without_credentials(string command)
     {
         string path = TempDirectory();
-        var args = command.Length == 0 ? [] : command.Split(' ');
+        string[] args = command.Length == 0 ? [] : command.Split(' ');
         var original = Console.Out;
         using var output = new StringWriter();
         try
