@@ -126,9 +126,18 @@ public sealed class SyncEngineTests
     {
         var (source, target) = Pair();
         target.ThrowOnSearch = true;
-        var rows = await SyncEngine.Run(source, target, SyncDirection.SpotifyToTidal, false);
+        var stderr = Console.Error;
+        using var output = new StringWriter();
+        IReadOnlyList<SyncResult> rows;
+        try
+        {
+            Console.SetError(output);
+            rows = await SyncEngine.Run(source, target, SyncDirection.SpotifyToTidal, false);
+        }
+        finally { Console.SetError(stderr); }
         Assert.Equal("error", Assert.Single(rows).Status);
         Assert.Contains("search unavailable", rows[0].Note);
+        Assert.Contains("Error: spotify-to-tidal track from-1: search unavailable", output.ToString());
     }
 
     [Fact]

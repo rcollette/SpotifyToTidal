@@ -43,12 +43,50 @@ public sealed class HttpAdapterTests
     {
         Id = "artist", Type = "artists", Attributes = new TidalArtistAttributesDto { Name = "Singer" }
     };
-    private static SpotifyLibrary Spotify(ScriptedHandler h, Func<TimeSpan, CancellationToken, Task>? wait = null) =>
+    // Fake clock keeps retry tests fast while allowing the shared-cooldown
+    // controller to observe the time that a fake delay advances.
+    private sealed class ManualClock
+    {
+        private readonly object gate = new();
+        private DateTimeOffset now = new(2026, 11, 17, 12, 0, 0, TimeSpan.Zero);
+        public readonly List<TimeSpan> Waits = [];
+        public DateTimeOffset Now { get { lock (gate) return now; } }
+        public Task Wait(TimeSpan delay, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            lock (gate)
+            {
+                Waits.Add(delay);
+                now += delay;
+            }
+            return Task.CompletedTask;
+        }
+    }
+
+    private static ApiRateLimiter WithFakeDelay(
+        string provider, Func<TimeSpan, CancellationToken, Task> wait)
+    {
+        var clock = new ManualClock();
+        return new ApiRateLimiter(provider, null, TimeSpan.FromSeconds(30),
+            async (delay, ct) => {
+                await wait(delay, ct);
+                await clock.Wait(delay, ct);
+            }, () => clock.Now);
+    }
+
+    private static SpotifyLibrary Spotify(ScriptedHandler h,
+        Func<TimeSpan, CancellationToken, Task>? wait = null,
+        ApiRateLimiter? limiter = null) =>
         new(new HttpClient(h), () => Task.FromResult("test-access"),
-            new Uri("https://spotify.test/"), wait);
-    private static TidalLibrary Tidal(ScriptedHandler h, Func<TimeSpan, CancellationToken, Task>? wait = null) =>
+            new Uri("https://spotify.test/"), rateLimiter: limiter ??
+                (wait is null ? null : WithFakeDelay("Spotify", wait)));
+
+    private static TidalLibrary Tidal(ScriptedHandler h,
+        Func<TimeSpan, CancellationToken, Task>? wait = null,
+        ApiRateLimiter? limiter = null) =>
         new(new HttpClient(h), () => Task.FromResult("test-access"),
-            new Uri("https://tidal.test/"), "US", wait, maxConcurrency: 1);
+            new Uri("https://tidal.test/"), "US", maxConcurrency: 1,
+            rateLimiter: limiter ?? (wait is null ? null : WithFakeDelay("TIDAL", wait)));
 
     [Fact]
     public async Task Spotify_saved_tracks_are_paginated_deduplicated_and_skip_invalid_rows()
@@ -218,7 +256,7 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
-    public async Task Too_many_requests_honors_retry_after_with_sixty_second_cap()
+    public async Task Too_many_requests_honors_full_server_retry_after_duration()
     {
         var h = new ScriptedHandler();
         var retry = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
@@ -239,12 +277,12 @@ public sealed class HttpAdapterTests
             Console.SetError(original);
         }
         Assert.Equal(2, h.Requests.Count);
-        Assert.Equal(TimeSpan.FromSeconds(60), Assert.Single(waits));
+        Assert.Equal(TimeSpan.FromMinutes(3), Assert.Single(waits));
         Assert.Contains("Spotify HTTP 429", log.ToString());
         Assert.Contains("GET /v1/me/tracks", log.ToString());
         Assert.Contains("attempt 1/5", log.ToString());
         Assert.Contains("server Retry-After=180s", log.ToString());
-        Assert.Contains("waiting 60s (60s maximum)", log.ToString());
+        Assert.Contains("waiting 180s (shared across Spotify workers)", log.ToString());
         Assert.Contains("before attempt 2/5", log.ToString());
     }
 
@@ -277,7 +315,7 @@ public sealed class HttpAdapterTests
         Assert.Contains("Spotify HTTP 429 rate limited GET /v1/search", log);
         Assert.Contains("attempt 1/5", log);
         Assert.Contains("attempt 2/5", log);
-        Assert.Contains("exponential backoff (2, 4, 8, 16s", log);
+        Assert.Contains("exponential backoff (2, 4, 8, 16, 32, 60s", log);
         Assert.Contains("waiting 2s", log);
         Assert.Contains("waiting 4s", log);
         Assert.DoesNotContain("TEST-ISRC-UNLOGGED", log);
@@ -312,8 +350,284 @@ public sealed class HttpAdapterTests
         var log = output.ToString();
         Assert.Equal(5, log.Split("HTTP 429", StringSplitOptions.None).Length - 1);
         Assert.Contains("attempt 5/5", log);
-        Assert.Contains("No more retries after 4 backoff waits", log);
-        Assert.Contains("policy: Retry-After seconds (max 60s)", log);
+        Assert.Contains("retries exhausted after four waits", log);
+        Assert.Contains("Backoff policy: exponential backoff", log);
+    }
+
+    [Fact]
+    public async Task Spotify_quota_exceeded_is_logged_and_is_not_retried()
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent("{\"error\":{\"status\":429,\"reason\":\"QUOTA_EXCEEDED\"}}")
+        });
+        List<TimeSpan> waits = [];
+        var library = Spotify(h, (delay, _) => { waits.Add(delay); return Task.CompletedTask; });
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            var error = await Assert.ThrowsAsync<HttpRequestException>(() => library.GetFavorites());
+            Assert.Equal(HttpStatusCode.TooManyRequests, error.StatusCode);
+            Assert.Contains("QUOTA_EXCEEDED", error.Message);
+        }
+        finally { Console.SetError(original); }
+        Assert.Single(h.Requests);
+        Assert.Empty(waits);
+        Assert.Contains("Spotify HTTP 429 QUOTA_EXCEEDED", output.ToString());
+        Assert.Contains("not retrying", output.ToString());
+    }
+
+    [Fact]
+    public async Task Retry_after_http_date_is_honored_without_sixty_second_cap()
+    {
+        var clock = new ManualClock();
+        var h = new ScriptedHandler();
+        var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        response.Headers.RetryAfter = new RetryConditionHeaderValue(clock.Now.AddSeconds(95));
+        h.Push(response);
+        h.Push(Response(new TidalTrackPage(), AppJsonContext.Default.TidalTrackPage));
+        var limiter = new ApiRateLimiter("TIDAL", null, TimeSpan.FromMinutes(1),
+            clock.Wait, () => clock.Now);
+        var original = Console.Error;
+        using var log = new StringWriter();
+        try
+        {
+            Console.SetError(log);
+            Assert.Empty(await Tidal(h, limiter: limiter).SearchIsrc("ISRC"));
+        }
+        finally { Console.SetError(original); }
+        Assert.Equal(TimeSpan.FromSeconds(95), Assert.Single(clock.Waits));
+        Assert.Contains("Retry-After HTTP-date", log.ToString());
+        Assert.Contains("waiting 95s", log.ToString());
+    }
+
+    [Fact]
+    public async Task Successful_api_call_resets_fallback_exponential_backoff()
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        h.Push(Response(new SpotifySavedTracksPage(), AppJsonContext.Default.SpotifySavedTracksPage));
+        h.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        h.Push(Response(new SpotifySavedTracksPage(), AppJsonContext.Default.SpotifySavedTracksPage));
+        List<TimeSpan> waits = [];
+        var library = Spotify(h, (delay, _) => {
+            waits.Add(delay); return Task.CompletedTask;
+        });
+        Assert.Empty(await library.GetFavorites());
+        Assert.Empty(await library.GetFavorites());
+        Assert.Equal(new[] { TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2) }, waits);
+        Assert.Equal(4, h.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Shared_cooldown_blocks_other_workers_before_sending()
+    {
+        var clock = new ManualClock();
+        var limiter = new ApiRateLimiter("Spotify", null, TimeSpan.FromSeconds(30),
+            clock.Wait, () => clock.Now);
+        var (delay, policy) = limiter.Register429(new RetryConditionHeaderValue(TimeSpan.FromSeconds(22)));
+        Assert.Equal(TimeSpan.FromSeconds(22), delay);
+        Assert.Contains("Retry-After", policy);
+        await limiter.WaitForTurnAsync(default); // Another worker sees the same shared cooldown.
+        Assert.Equal(TimeSpan.FromSeconds(22), Assert.Single(clock.Waits));
+    }
+
+    [Fact]
+    public async Task Configured_local_sliding_window_limit_is_enforced()
+    {
+        var clock = new ManualClock();
+        var limiter = new ApiRateLimiter("Spotify", 2, TimeSpan.FromSeconds(30),
+            clock.Wait, () => clock.Now);
+        await limiter.WaitForTurnAsync(default);
+        await limiter.WaitForTurnAsync(default);
+        Assert.Empty(clock.Waits);
+        await limiter.WaitForTurnAsync(default);
+        Assert.Equal(TimeSpan.FromSeconds(30), Assert.Single(clock.Waits));
+        await limiter.WaitForTurnAsync(default);
+        Assert.Single(clock.Waits);
+    }
+
+    [Fact]
+    public async Task Nonretryable_errors_are_logged_with_path_without_query_parameters()
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.Forbidden)
+        {
+            Content = new StringContent("Forbidden")
+        });
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            await Assert.ThrowsAsync<HttpRequestException>(
+                () => Spotify(h).SearchIsrc("SECRET-ISRC"));
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("Error: Spotify HTTP 403 GET /v1/search", output.ToString());
+        Assert.DoesNotContain("SECRET-ISRC", output.ToString());
+        Assert.Contains("non-retryable", output.ToString());
+    }
+
+    [Fact]
+    public async Task Server_errors_log_the_retry_and_final_failure()
+    {
+        var h = new ScriptedHandler();
+        for (int i = 0; i < 5; i++)
+            h.Push(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            await Assert.ThrowsAsync<HttpRequestException>(() =>
+                Spotify(h, (_, _) => Task.CompletedTask).GetFavorites());
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("Error: Spotify HTTP 503 GET /v1/me/tracks (attempt 1/5)", output.ToString());
+        Assert.Contains("waiting 2s", output.ToString());
+        Assert.Contains("attempt 5/5); retries exhausted", output.ToString());
+    }
+
+    [Fact]
+    public async Task Transport_failures_are_logged_without_exposing_exception_messages()
+    {
+        var h = new ScriptedHandler();
+        h.Push(_ => throw new HttpRequestException("secret-value"));
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            await Assert.ThrowsAsync<HttpRequestException>(() => Spotify(h).GetFavorites());
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("Error: Spotify request GET /v1/me/tracks failed", output.ToString());
+        Assert.DoesNotContain("secret-value", output.ToString());
+    }
+
+    [Fact]
+    public void Local_rate_limit_budget_and_window_must_be_positive()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ApiRateLimiter("Spotify", 0, TimeSpan.FromSeconds(30)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ApiRateLimiter("Spotify", -1, TimeSpan.FromSeconds(30)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ApiRateLimiter("Spotify", null, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void Expired_http_date_retry_after_has_zero_duration()
+    {
+        var clock = new ManualClock();
+        var limiter = new ApiRateLimiter("Spotify", null, TimeSpan.FromSeconds(30),
+            clock.Wait, () => clock.Now);
+        var (delay, policy) = limiter.Register429(
+            new RetryConditionHeaderValue(clock.Now.AddMinutes(-1)));
+        Assert.Equal(TimeSpan.Zero, delay);
+        Assert.Contains("HTTP-date", policy);
+    }
+
+    [Fact]
+    public void Server_errors_honor_retry_after_seconds_and_http_dates()
+    {
+        var now = new DateTimeOffset(2026, 11, 17, 12, 0, 0, TimeSpan.Zero);
+        var seconds = ApiRateLimiter.ServerRetry(
+            new RetryConditionHeaderValue(TimeSpan.FromSeconds(77)), 0, now);
+        Assert.Equal(TimeSpan.FromSeconds(77), seconds.Delay);
+        Assert.Contains("delta-seconds", seconds.Policy);
+
+        var future = ApiRateLimiter.ServerRetry(
+            new RetryConditionHeaderValue(now.AddSeconds(91)), 0, now);
+        Assert.Equal(TimeSpan.FromSeconds(91), future.Delay);
+        Assert.Contains("HTTP-date", future.Policy);
+
+        var past = ApiRateLimiter.ServerRetry(
+            new RetryConditionHeaderValue(now.AddSeconds(-1)), 0, now);
+        Assert.Equal(TimeSpan.Zero, past.Delay);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("{\"error\":\"not-an-object\"}")]
+    [InlineData("{\"error\":{}}")]
+    [InlineData("{\"error\":{\"reason\":123}}")]
+    [InlineData("{\"error\":{\"reason\":\"SOME_OTHER_REASON\"}}")]
+    [InlineData("not valid json")]
+    public async Task Spotify_429_without_quota_reason_remains_retryable(string body)
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent(body)
+        });
+        h.Push(Response(new SpotifySavedTracksPage(), AppJsonContext.Default.SpotifySavedTracksPage));
+        List<TimeSpan> waits = [];
+        Assert.Empty(await Spotify(h, (delay, _) => {
+            waits.Add(delay);
+            return Task.CompletedTask;
+        }).GetFavorites());
+        Assert.Equal(TimeSpan.FromSeconds(2), Assert.Single(waits));
+    }
+
+    private sealed class BrokenResponseContent(bool timeout) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            timeout ? Task.FromException(new TaskCanceledException("simulated read timeout")) :
+                Task.FromException(new HttpRequestException("simulated read failure"));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Response_body_read_failures_are_logged(bool timeout)
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new BrokenResponseContent(timeout)
+        });
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            if (timeout)
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Spotify(h).GetFavorites());
+            else
+                await Assert.ThrowsAsync<HttpRequestException>(() => Spotify(h).GetFavorites());
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("Error: Spotify response GET /v1/me/tracks could not be read", output.ToString());
+        Assert.DoesNotContain("simulated read", output.ToString());
+    }
+
+    [Fact]
+    public async Task Transport_timeouts_are_logged_without_retrying()
+    {
+        var h = new ScriptedHandler();
+        h.Push(_ => throw new TaskCanceledException("timed out"));
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Spotify(h).GetFavorites());
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("TaskCanceledException", output.ToString());
+        Assert.DoesNotContain("timed out", output.ToString());
     }
 
     [Fact]

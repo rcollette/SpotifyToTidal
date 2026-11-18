@@ -195,6 +195,8 @@ public static class SyncEngine
                     {
                         rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
                             "error", null, ex.Message);
+                        Console.Error.WriteLine(
+                            $"Error: {name} track {song.Id}: {ex.Message}");
                     }
                     finally
                     {

@@ -8,11 +8,13 @@ public sealed class CliAcceptanceTests
         Path.Combine(Path.GetTempPath(), "SpotifyToTidal-Tests-" + Guid.NewGuid().ToString("N"));
 
     private static async Task WriteCredentials(string path, bool tokens = true, bool expired = false,
-        string spotifyClientId = "spotify-test-client")
+        string spotifyClientId = "spotify-test-client",
+        int? spotifyBudget = null, int? tidalBudget = null)
     {
         Directory.CreateDirectory(path);
         var settings = new AppSettings(spotifyClientId, "tidal-test-client",
-            "http://127.0.0.1:8765/callback/", "http://127.0.0.1:8766/callback/", "US");
+            "http://127.0.0.1:8765/callback/", "http://127.0.0.1:8766/callback/", "US",
+            SpotifyRequestsPer30Seconds: spotifyBudget, TidalRequestsPerMinute: tidalBudget);
         await File.WriteAllTextAsync(Path.Combine(path, "config.json"),
             JsonSerializer.Serialize(settings, AppJsonContext.Default.AppSettings));
         if (tokens)
@@ -174,6 +176,48 @@ public sealed class CliAcceptanceTests
             ["sync", "--dry-run", "--max-concurrency", "2", "--prune-unavailable-tidal"],
             path, http));
         Assert.True(File.Exists(Path.Combine(path, "report.csv")));
+    }
+
+    [Fact]
+    public async Task Zero_spotify_budget_is_rejected_with_console_error()
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path, spotifyBudget: 0);
+        var error = Console.Error;
+        using var log = new StringWriter();
+        try
+        {
+            Console.SetError(log);
+            Assert.Equal(1, await Program.Run(["sync"], path));
+        }
+        finally { Console.SetError(error); }
+        Assert.Contains("Error: Configured API request budgets must be positive", log.ToString());
+    }
+
+    [Fact]
+    public async Task Zero_tidal_budget_is_rejected()
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path, tidalBudget: 0);
+        Assert.Equal(1, await Program.Run(["sync"], path));
+    }
+
+    [Fact]
+    public async Task Positive_local_budgets_are_accepted_and_described_in_console()
+    {
+        string path = TempDirectory();
+        await WriteCredentials(path, spotifyBudget: 100, tidalBudget: 100);
+        var output = Console.Out;
+        using var log = new StringWriter();
+        try
+        {
+            Console.SetOut(log);
+            using var http = new HttpClient(new FakeMusicApi());
+            Assert.Equal(0, await Program.Run(["sync", "--dry-run"], path, http));
+        }
+        finally { Console.SetOut(output); }
+        Assert.Contains("Spotify 100/30s", log.ToString());
+        Assert.Contains("TIDAL 100/60s", log.ToString());
     }
 
     [Theory]
