@@ -123,17 +123,16 @@ public sealed class HttpAdapterTests
             Data = [new TidalResourceDto { Id = "tid-1" }, new TidalResourceDto { Id = "tid-2" }],
             Links = new TidalLinksDto { Next = "/v2/favorites?page=2" }
         }, AppJsonContext.Default.TidalCollectionPage));
-        h.Push(Response(new TidalTrackDetail {
-            Data = TidalTrack("tid-1"), Included = [TidalArtist()]
-        }, AppJsonContext.Default.TidalTrackDetail));
-        h.Push(Response(new TidalTrackDetail {
-            Data = TidalTrack("tid-2", relationship:false, artistFallback:"Fallback Artist"), Included = []
-        }, AppJsonContext.Default.TidalTrackDetail));
+        h.Push(Response(new TidalTrackPage {
+            Data = [TidalTrack("tid-1"),
+                TidalTrack("tid-2", relationship:false, artistFallback:"Fallback Artist")],
+            Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackPage));
         var list = await Tidal(h).GetFavorites();
         Assert.Equal(2, list.Count);
         Assert.Equal("Singer", list[0].Artist);
         Assert.Equal("Fallback Artist", list[1].Artist);
-        Assert.Equal(4, h.Requests.Count);
+        Assert.Equal(3, h.Requests.Count);
     }
 
     [Fact]
