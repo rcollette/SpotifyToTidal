@@ -152,22 +152,24 @@ public static class SyncEngine
                     }
                     finally
                     {
-                        progress?.Invoke(new SyncProgress(name,
+                        progress?.Invoke(new SyncProgress(name == "spotify-to-tidal"
+                            ? "Spotify → TIDAL" : "TIDAL → Spotify",
                             Interlocked.Increment(ref completed), songs.Length));
                     }
                 });
             if (songs.Length == 0)
-                progress?.Invoke(new SyncProgress(name, 0, 0));
+                progress?.Invoke(new SyncProgress(name == "spotify-to-tidal"
+                    ? "Spotify → TIDAL" : "TIDAL → Spotify", 0, 0));
             return rows;
         }
 
         // Directional jobs are independent after the snapshots. Their outputs
         // are returned in stable source order, even when HTTP calls finish out of order.
         var outbound = direction is SyncDirection.Both or SyncDirection.SpotifyToTidal
-            ? Transfer(tidal, spotifyFavorites, tidalFavorites, "Spotify → TIDAL")
+            ? Transfer(tidal, spotifyFavorites, tidalFavorites, "spotify-to-tidal")
             : Task.FromResult(Array.Empty<SyncResult>());
         var inbound = direction is SyncDirection.Both or SyncDirection.TidalToSpotify
-            ? Transfer(spotify, tidalFavorites, spotifyFavorites, "TIDAL → Spotify")
+            ? Transfer(spotify, tidalFavorites, spotifyFavorites, "tidal-to-spotify")
             : Task.FromResult(Array.Empty<SyncResult>());
         await Task.WhenAll(outbound, inbound);
         return [.. outbound.Result, .. inbound.Result];
