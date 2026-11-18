@@ -132,7 +132,8 @@ public abstract class HttpTrackLibrary(HttpClient http, Func<Task<string>> beare
                         $"Error: {Name} HTTP {(int)response.StatusCode} {method} {safePath}; " +
                         "non-retryable response.");
                     throw new HttpRequestException(
-                        $"{Name} returned {(int)response.StatusCode} for {method} {req.RequestUri}: " +
+                        $"{Name} returned {(int)response.StatusCode} for {method} " +
+                        $"{req.RequestUri!.GetLeftPart(UriPartial.Path)}: " +
                         body[..Math.Min(body.Length, 400)], null, response.StatusCode);
                 }
 

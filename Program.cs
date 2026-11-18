@@ -248,6 +248,6 @@ public static class Program
             Console.WriteLine("Report: " + path);
             return results.Any(r => r.Status == "error") ? 1 : 0;
         }
-        catch (Exception ex) { Console.Error.WriteLine(ex.Message); return 1; }
+        catch (Exception ex) { Console.Error.WriteLine("Error: " + ex.Message); return 1; }
     }
 }
