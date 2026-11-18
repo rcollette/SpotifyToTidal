@@ -27,6 +27,39 @@ public sealed class CliAcceptanceTests
         }
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("help")]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    [InlineData("sync --help")]
+    [InlineData("sync -h")]
+    public async Task Help_shows_all_supported_sync_options_without_credentials(string command)
+    {
+        string path = TempDirectory();
+        string[] args = command.Length == 0 ? [] : command.Split(' ');
+        var original = Console.Out;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetOut(output);
+            Assert.Equal(0, await Program.Run(args, path));
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
+
+        var help = output.ToString();
+        Assert.Contains("--prune-unavailable-tidal", help);
+        Assert.Contains("--dry-run", help);
+        Assert.Contains("--max-concurrency", help);
+        Assert.Contains("--direction", help);
+        Assert.Contains("SpotifyToTidal sync --dry-run --prune-unavailable-tidal", help);
+        Assert.Contains("destructive; disabled by default", help);
+        Assert.False(File.Exists(Path.Combine(path, "config.json")));
+    }
+
     [Fact]
     public async Task Command_line_help_and_reports_have_no_configuration_dependency()
     {
