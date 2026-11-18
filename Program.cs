@@ -128,7 +128,29 @@ public sealed class OAuthManager(string dataDirectory, AppSettings settings, Htt
 public static class Program
 {
     static void Help() => Console.WriteLine(
-        "Commands:\n  login spotify|tidal\n  sync [--dry-run] [--direction both|spotify-to-tidal|tidal-to-spotify]\n  report");
+        """
+        SpotifyToTidal — Spotify Liked Songs / TIDAL Favorite Tracks
+
+        Usage:
+          SpotifyToTidal login spotify|tidal
+          SpotifyToTidal sync [options]
+          SpotifyToTidal report
+          SpotifyToTidal help
+
+        Sync options:
+          --direction both|spotify-to-tidal|tidal-to-spotify
+                                      Direction (default: both)
+          --dry-run                   Preview additions and cleanup; make no changes
+          --max-concurrency N         Concurrent operations per service (1-32; default: 5)
+          --prune-unavailable-tidal   DELETE TIDAL favorites with unavailable metadata
+                                      (destructive; disabled by default)
+
+        Cleanup examples:
+          SpotifyToTidal sync --dry-run --prune-unavailable-tidal
+          SpotifyToTidal sync --prune-unavailable-tidal
+
+        Help: SpotifyToTidal --help  or  SpotifyToTidal sync --help
+        """);
 
     public static Task<int> Main(string[] args) =>
         Run(args, Path.Combine(
@@ -140,7 +162,12 @@ public static class Program
     {
         try
         {
-            if (args.Length == 0) { Help(); return 0; }
+            if (args.Length == 0 ||
+                args is ["help" or "--help" or "-h"] or
+                    ["sync", "--help" or "-h"])
+            {
+                Help(); return 0;
+            }
             Directory.CreateDirectory(dataDir);
             if (args[0] == "report")
             {
