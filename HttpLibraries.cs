@@ -149,6 +149,7 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
     public override async Task<IReadOnlyList<Track>> GetFavorites(CancellationToken ct = default)
     {
         List<Track> tracks = [];
+        int missingTracks = 0, retrievedTracks = 0;
         // The user-collection relationship endpoint has no countryCode parameter.
         // Country context is applied when hydrating individual track metadata.
         string? next = "/v2/userCollectionTracks/me/relationships/items";
@@ -173,14 +174,34 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
             foreach (var entry in page.Data)
             {
                 if (entry.Id is null) continue;
-                var detail = await Request(HttpMethod.Get, "/v2/tracks/" + Escape(entry.Id) +
-                    "?countryCode=" + Escape(country) + "&include=artists",
-                    AppJsonContext.Default.TidalTrackDetail, ct: ct);
+                TidalTrackDetail detail;
+                try
+                {
+                    detail = await Request(HttpMethod.Get, "/v2/tracks/" + Escape(entry.Id) +
+                        "?countryCode=" + Escape(country) + "&include=artists",
+                        AppJsonContext.Default.TidalTrackDetail, ct: ct);
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+                {
+                    // TIDAL keeps original favorites IDs even when a recording
+                    // disappears from a country's catalogue. Do not fail an
+                    // otherwise valid collection read because one track is gone.
+                    missingTracks++;
+                    Console.Error.WriteLine("Warning: TIDAL favorite track " + entry.Id +
+                        " returned 404 in " + country + "; skipping unavailable metadata.");
+                    continue;
+                }
+                retrievedTracks++;
                 if (Parse(detail.Data, detail.Included) is { } song)
                     tracks.Add(song);
             }
             next = NextPage(page.Links?.Next, next);
         }
+        if (missingTracks > 0 && retrievedTracks == 0)
+            throw new HttpRequestException(
+                "Every TIDAL favorite track detail request returned 404 (" + missingTracks +
+                " tracks). Check the TIDAL app's catalog access and config.json countryCode; " +
+                "cannot safely treat these favorites as an empty collection.");
         return tracks.DistinctBy(t => t.Id).ToList();
     }
 
