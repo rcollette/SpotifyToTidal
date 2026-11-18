@@ -578,6 +578,8 @@ public sealed class HttpAdapterTests
         readonly object gate = new();
         int active;
         public int Peak { get; private set; }
+        public int BatchRequests;
+        public int SingleRequests;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
             CancellationToken ct)
@@ -586,24 +588,38 @@ public sealed class HttpAdapterTests
                 "/v2/userCollectionTracks/me/relationships/items")
                 return Response(new TidalCollectionPage
                 {
-                    Data = Enumerable.Range(1, 9)
+                    Data = Enumerable.Range(1, 45)
                         .Select(i => new TidalResourceDto
                         {
                             Id = "item-" + i, Type = "tracks"
                         }).ToArray()
                 }, AppJsonContext.Default.TidalCollectionPage);
 
-            Assert.StartsWith("/v2/tracks/", request.RequestUri.AbsolutePath);
+            Assert.Equal(HttpMethod.Get, request.Method);
+            if (request.RequestUri.AbsolutePath.StartsWith("/v2/tracks/"))
+            {
+                Interlocked.Increment(ref SingleRequests);
+                throw new Exception("Unexpected individual metadata request");
+            }
+            Assert.Equal("/v2/tracks", request.RequestUri.AbsolutePath);
+            Interlocked.Increment(ref BatchRequests);
+            var query = Uri.UnescapeDataString(request.RequestUri.Query);
+            var idsParam = query.TrimStart('?').Split('&')
+                .Single(p => p.StartsWith("filter[id]=", StringComparison.Ordinal));
+            var ids = idsParam["filter[id]=".Length..].Split(',');
+            Assert.InRange(ids.Length, 1, 20);
+            Assert.Contains("include=artists", query);
+
             var current = Interlocked.Increment(ref active);
             lock (gate) Peak = Math.Max(Peak, current);
             try
             {
                 await Task.Delay(30, ct);
-                var id = request.RequestUri.AbsolutePath["/v2/tracks/".Length..];
-                return Response(new TidalTrackDetail
+                return Response(new TidalTrackPage
                 {
-                    Data = TidalTrack(id, artistFallback: "Singer", relationship: false)
-                }, AppJsonContext.Default.TidalTrackDetail);
+                    Data = ids.Select(id => TidalTrack(id, artistFallback: "Singer",
+                        relationship: false)).ToArray()
+                }, AppJsonContext.Default.TidalTrackPage);
             }
             finally
             {
@@ -621,11 +637,13 @@ public sealed class HttpAdapterTests
             new Uri("https://tidal.test/"), maxConcurrency: 3, progress: progress.Add);
         var songs = await library.GetFavorites();
         Assert.Equal(3, handler.Peak);
-        Assert.Equal(9, songs.Count);
+        Assert.Equal(3, handler.BatchRequests);
+        Assert.Equal(0, handler.SingleRequests);
+        Assert.Equal(45, songs.Count);
         Assert.Equal("item-1", songs[0].Id);
-        Assert.Equal("item-9", songs[8].Id);
+        Assert.Equal("item-45", songs[44].Id);
         Assert.Contains(progress, p => p.Stage == "TIDAL metadata" &&
-            p.Completed == 9 && p.Total == 9);
+            p.Completed == 45 && p.Total == 45);
     }
 
     [Fact]
