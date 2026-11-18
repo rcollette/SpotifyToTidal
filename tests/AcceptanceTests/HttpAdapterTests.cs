@@ -227,9 +227,93 @@ public sealed class HttpAdapterTests
         h.Push(Response(new SpotifySavedTracksPage(), AppJsonContext.Default.SpotifySavedTracksPage));
         List<TimeSpan> waits = [];
         var lib = Spotify(h, (delay, ct) => { waits.Add(delay); return Task.CompletedTask; });
-        Assert.Empty(await lib.GetFavorites());
+        var original = Console.Error;
+        using var log = new StringWriter();
+        try
+        {
+            Console.SetError(log);
+            Assert.Empty(await lib.GetFavorites());
+        }
+        finally
+        {
+            Console.SetError(original);
+        }
         Assert.Equal(2, h.Requests.Count);
         Assert.Equal(TimeSpan.FromSeconds(60), Assert.Single(waits));
+        Assert.Contains("Spotify HTTP 429", log.ToString());
+        Assert.Contains("GET /v1/me/tracks", log.ToString());
+        Assert.Contains("attempt 1/5", log.ToString());
+        Assert.Contains("server Retry-After=180s", log.ToString());
+        Assert.Contains("waiting 60s (60s maximum)", log.ToString());
+        Assert.Contains("before attempt 2/5", log.ToString());
+    }
+
+    [Fact]
+    public async Task HTTP_429_without_retry_after_logs_exponential_schedule_and_actual_delays()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        handler.Push(Response(new SpotifySearchResponse(), AppJsonContext.Default.SpotifySearchResponse));
+        List<TimeSpan> delays = [];
+        var library = Spotify(handler, (delay, _) =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        });
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            Assert.Empty(await library.SearchIsrc("TEST-ISRC-UNLOGGED"));
+        }
+        finally
+        {
+            Console.SetError(original);
+        }
+        Assert.Equal([TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4)], delays);
+        var log = output.ToString();
+        Assert.Contains("Spotify HTTP 429 rate limited GET /v1/search", log);
+        Assert.Contains("attempt 1/5", log);
+        Assert.Contains("attempt 2/5", log);
+        Assert.Contains("exponential backoff (2, 4, 8, 16s", log);
+        Assert.Contains("waiting 2s", log);
+        Assert.Contains("waiting 4s", log);
+        Assert.DoesNotContain("TEST-ISRC-UNLOGGED", log);
+    }
+
+    [Fact]
+    public async Task Final_HTTP_429_is_logged_as_exhausted_without_another_delay()
+    {
+        var handler = new ScriptedHandler();
+        for (int i = 0; i < 5; i++)
+            handler.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        List<TimeSpan> waits = [];
+        var library = Tidal(handler, (delay, _) =>
+        {
+            waits.Add(delay);
+            return Task.CompletedTask;
+        });
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            var ex = await Assert.ThrowsAsync<HttpRequestException>(() => library.GetFavorites());
+            Assert.Contains("TIDAL returned 429 after retries", ex.Message);
+        }
+        finally
+        {
+            Console.SetError(original);
+        }
+        Assert.Equal(5, handler.Requests.Count);
+        Assert.Equal([2.0, 4.0, 8.0, 16.0], waits.Select(x => x.TotalSeconds));
+        var log = output.ToString();
+        Assert.Equal(5, log.Split("HTTP 429", StringSplitOptions.None).Length - 1);
+        Assert.Contains("attempt 5/5", log);
+        Assert.Contains("No more retries after 4 backoff waits", log);
+        Assert.Contains("policy: Retry-After seconds (max 60s)", log);
     }
 
     [Fact]
