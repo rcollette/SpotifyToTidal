@@ -209,6 +209,90 @@ public sealed class ParallelSyncTests
     }
 
     [Fact]
+    public async Task Concurrent_sources_with_same_ISRC_share_one_catalog_search()
+    {
+        var first = Song(1);
+        var second = first with { Id = "second-source", Title = "Different song",
+            Isrc = first.Isrc!.ToLowerInvariant() };
+        int searches = 0;
+        var spotify = new Library("Spotify") { Favorites = [first, second] };
+        var tidal = new Library("TIDAL")
+        {
+            Search = async (_, token) =>
+            {
+                Interlocked.Increment(ref searches);
+                await Task.Delay(25, token);
+                return [first with { Id = "tidal-first" },
+                    second with { Id = "tidal-second" }];
+            }
+        };
+        var rows = await SyncEngine.Run(spotify, tidal, SyncDirection.SpotifyToTidal,
+            true, maxConcurrency: 2);
+        Assert.Equal(1, searches);
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("tidal-first", rows[0].DestinationId);
+        Assert.Equal("tidal-second", rows[1].DestinationId);
+        Assert.All(rows, row => Assert.Equal("would-add", row.Status));
+    }
+
+    [Fact]
+    public async Task Existing_favorites_index_preserves_exact_normalized_recording_match()
+    {
+        var source = new Library("Spotify")
+        {
+            Favorites = [new Track("spot", "Héllo - Song!", "Artist A", "USAAA0000001")]
+        };
+        var destination = new Library("TIDAL")
+        {
+            Favorites = [new Track("tidal", "Hello Song", "artist a", "usaaa0000001")],
+            Search = (_, _) => throw new Exception("No catalog lookup expected")
+        };
+        var row = Assert.Single(await SyncEngine.Run(source, destination,
+            SyncDirection.SpotifyToTidal, false));
+        Assert.Equal("already-present", row.Status);
+        Assert.Empty(destination.Written);
+    }
+
+    [Fact]
+    public async Task Incomplete_favorite_metadata_is_not_an_exact_recording_match()
+    {
+        var source = new Library("Spotify") { Favorites = [Song(1)] };
+        var destination = new Library("TIDAL")
+        {
+            Favorites = [Song(1, "t") with { Artist = " " }]
+        };
+        var row = Assert.Single(await SyncEngine.Run(source, destination,
+            SyncDirection.SpotifyToTidal, true));
+        Assert.Equal("unmatched", row.Status);
+    }
+
+    [Fact]
+    public async Task A_failed_ISRC_search_is_shared_per_run_but_not_across_runs()
+    {
+        int attempts = 0;
+        var source = new Library("Spotify")
+        {
+            Favorites = [Song(1), Song(1) with { Id = "alternate" }]
+        };
+        var destination = new Library("TIDAL")
+        {
+            Search = (_, _) =>
+            {
+                Interlocked.Increment(ref attempts);
+                throw new HttpRequestException("catalog unavailable");
+            }
+        };
+        var first = await SyncEngine.Run(source, destination,
+            SyncDirection.SpotifyToTidal, true, maxConcurrency: 2);
+        Assert.Equal(2, first.Count(r => r.Status == "error"));
+        Assert.Equal(1, attempts);
+        var second = await SyncEngine.Run(source, destination,
+            SyncDirection.SpotifyToTidal, true, maxConcurrency: 2);
+        Assert.Equal(2, second.Count(r => r.Status == "error"));
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
     public async Task Concurrency_must_be_positive()
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
