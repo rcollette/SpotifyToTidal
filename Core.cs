@@ -103,6 +103,21 @@ public static class SyncEngine
             var songs = source.DistinctBy(s => s.Id).ToArray();
             var rows = new SyncResult[songs.Length];
             var completed = 0;
+            // Build immutable indexes from the original snapshot. A recording key
+            // has the same ISRC/title/artist requirements as SameRecording.
+            var existingRecordings = destination
+                .Where(t => !string.IsNullOrWhiteSpace(t.Isrc) &&
+                    !string.IsNullOrWhiteSpace(t.Artist))
+                .Select(t => (Isrc: t.Isrc!.ToUpperInvariant(),
+                    Title: TrackMatcher.Normalize(t.Title),
+                    Artist: TrackMatcher.Normalize(t.Artist)))
+                .ToHashSet();
+            var existingIds = destination.Select(t => t.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            // Lazy ensures one HTTP search per distinct ISRC even when multiple
+            // parallel workers request the same catalog entry simultaneously.
+            var searches = new ConcurrentDictionary<string,
+                Lazy<Task<IReadOnlyList<Track>>>>(StringComparer.OrdinalIgnoreCase);
             // A per-ID gate prevents two source records from adding the same
             // destination favorite concurrently. A failed add is not reserved.
             var locks = new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
@@ -115,7 +130,11 @@ public static class SyncEngine
                     var song = songs[index];
                     try
                     {
-                        if (destination.Any(existing => TrackMatcher.SameRecording(song, existing)))
+                        if (!string.IsNullOrWhiteSpace(song.Isrc) &&
+                            !string.IsNullOrWhiteSpace(song.Artist) &&
+                            existingRecordings.Contains((song.Isrc.ToUpperInvariant(),
+                                TrackMatcher.Normalize(song.Title),
+                                TrackMatcher.Normalize(song.Artist))))
                         {
                             rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
                                 "already-present", null, "Already favorited");
@@ -127,14 +146,16 @@ public static class SyncEngine
                         }
                         else
                         {
-                            var candidates = await to.SearchIsrc(song.Isrc, token);
+                            var candidates = await searches.GetOrAdd(song.Isrc,
+                                isrc => new Lazy<Task<IReadOnlyList<Track>>>(
+                                    () => to.SearchIsrc(isrc, ct))).Value;
                             var (match, note) = TrackMatcher.UniqueMatch(song, candidates);
                             if (match is null)
                             {
                                 rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
                                     "unmatched", null, note);
                             }
-                            else if (destination.Any(t => t.Id == match.Id))
+                            else if (existingIds.Contains(match.Id))
                             {
                                 rows[index] = new(name, song.Id, song.Title, song.Artist, song.Isrc,
                                     "already-present", match.Id, "Destination ID already favorited");
