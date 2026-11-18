@@ -189,6 +189,26 @@ public sealed class ParallelSyncTests
     }
 
     [Fact]
+    public void Coordinated_console_progress_is_monotonic_and_rate_limited()
+    {
+        using var output = new StringWriter();
+        var writer = new SyncConsoleProgress(output);
+        writer.Report(new SyncProgress("TIDAL metadata", 1, 50));
+        writer.Report(new SyncProgress("TIDAL metadata", 2, 50));
+        writer.Report(new SyncProgress("TIDAL metadata", 4, 50));
+        writer.Report(new SyncProgress("TIDAL metadata", 3, 50));
+        writer.Report(new SyncProgress("TIDAL metadata", 50, 50));
+        writer.Report(new SyncProgress("TIDAL metadata", 50, 50));
+        writer.Report(new SyncProgress("Spotify favorites", 0, 0));
+        var lines = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(4, lines.Length);
+        Assert.Contains("TIDAL metadata: 1/50 tracks processed", lines[0]);
+        Assert.Contains("TIDAL metadata: 4/50 tracks processed", lines[1]);
+        Assert.Contains("TIDAL metadata: 50/50 tracks processed", lines[2]);
+        Assert.Contains("Spotify favorites: 0/0 tracks processed", lines[3]);
+    }
+
+    [Fact]
     public async Task Concurrency_must_be_positive()
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
