@@ -181,40 +181,95 @@ public sealed class TidalLibrary(HttpClient http, Func<Task<string>> token, Uri 
         var tracks = new Track?[trackIds.Length];
         var missing = new ConcurrentQueue<string>();
         int resolved = 0, processed = 0;
-        await Parallel.ForEachAsync(Enumerable.Range(0, trackIds.Length),
-            new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
-            async (index, token) =>
+
+        // Every cleanup candidate is confirmed via the single-track endpoint.
+        // This avoids deleting legitimate favorites on a partial batch response.
+        void Complete(int index, TidalTrackDto? detail,
+            IReadOnlyList<TidalArtistDto> artists)
+        {
+            if (detail?.Attributes is null)
             {
-                var id = trackIds[index];
+                missing.Enqueue(trackIds[index]);
+                Console.Error.WriteLine("Warning: TIDAL favorite " + trackIds[index] +
+                    " has no available track metadata in " + country + "; skipped.");
+            }
+            else
+            {
+                Interlocked.Increment(ref resolved);
+                tracks[index] = Parse(detail, artists);
+            }
+            progress?.Invoke(new SyncProgress("TIDAL metadata",
+                Interlocked.Increment(ref processed), trackIds.Length));
+        }
+
+        async Task FetchIndividually(int index, CancellationToken token)
+        {
+            var id = trackIds[index];
+            try
+            {
+                var detail = await Request(HttpMethod.Get, "/v2/tracks/" + Escape(id) +
+                    "?countryCode=" + Escape(country) + "&include=artists",
+                    AppJsonContext.Default.TidalTrackDetail, ct: token);
+                Complete(index, detail.Data, detail.Included);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                Complete(index, null, []);
+            }
+        }
+
+        // TIDAL documents GET /tracks filter[id] with up to 20 track IDs.
+        // Batches run concurrently, preserving the original favorites order.
+        const int batchSize = 20;
+        var batches = Enumerable.Range(0, (trackIds.Length + batchSize - 1) / batchSize);
+        await Parallel.ForEachAsync(batches,
+            new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = ct },
+            async (batch, token) =>
+            {
+                int start = batch * batchSize;
+                int count = Math.Min(batchSize, trackIds.Length - start);
+                if (count == 1)
+                {
+                    await FetchIndividually(start, token);
+                    return;
+                }
+
+                string? pagePath = "/v2/tracks?filter%5Bid%5D=" +
+                    Escape(string.Join(",", trackIds.Skip(start).Take(count))) +
+                    "&countryCode=" + Escape(country) + "&include=artists";
+                var pages = new HashSet<string>(StringComparer.Ordinal);
+                var found = new Dictionary<string, TidalTrackDto>(StringComparer.Ordinal);
+                var artists = new List<TidalArtistDto>();
                 try
                 {
-                    var detail = await Request(HttpMethod.Get, "/v2/tracks/" + Escape(id) +
-                        "?countryCode=" + Escape(country) + "&include=artists",
-                        AppJsonContext.Default.TidalTrackDetail, ct: token);
-                    // Missing attributes are not evidence of a usable recording.
-                    // Do not prune merely because a valid track lacks an ISRC.
-                    if (detail.Data?.Attributes is null)
+                    while (pagePath is not null && pages.Add(pagePath))
                     {
-                        missing.Enqueue(id);
-                        Console.Error.WriteLine("Warning: TIDAL favorite " + id +
-                            " has no track metadata; skipped.");
+                        var page = await Request(HttpMethod.Get, pagePath,
+                            AppJsonContext.Default.TidalTrackPage, ct: token);
+                        foreach (var item in page.Data)
+                            if (item?.Id is not null) found[item.Id] = item;
+                        artists.AddRange(page.Included);
+                        pagePath = NextPage(page.Links?.Next, pagePath);
                     }
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode is
+                    HttpStatusCode.BadRequest or HttpStatusCode.NotFound)
+                {
+                    // An unavailable ID or a provider limitation must not
+                    // break sync or result in unverified deletion candidates.
+                    for (int offset = 0; offset < count; offset++)
+                        await FetchIndividually(start + offset, token);
+                    return;
+                }
+
+                for (int offset = 0; offset < count; offset++)
+                {
+                    int index = start + offset;
+                    if (found.TryGetValue(trackIds[index], out var detail) &&
+                        detail.Attributes is not null)
+                        Complete(index, detail, artists);
                     else
-                    {
-                        Interlocked.Increment(ref resolved);
-                        tracks[index] = Parse(detail.Data, detail.Included);
-                    }
-                }
-                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-                {
-                    missing.Enqueue(id);
-                    Console.Error.WriteLine("Warning: TIDAL favorite track " + id +
-                        " returned 404 in " + country + "; skipping unavailable metadata.");
-                }
-                finally
-                {
-                    progress?.Invoke(new SyncProgress("TIDAL metadata",
-                        Interlocked.Increment(ref processed), trackIds.Length));
+                        await FetchIndividually(index, token);
                 }
             });
 
