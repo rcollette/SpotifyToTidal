@@ -121,6 +121,18 @@ dotnet run --project SpotifyToTidal.csproj -- report
 
 The CLI opens the authorization URL in the browser and listens for the `http://127.0.0.1:.../callback/` response. The output CSV is written to the configuration directory as `report.csv`. If you are investigating an API issue, use `--dry-run` before running write operations.
 
+## Bounded parallel sync and cleanup
+
+The synchronization engine launches the two provider library snapshots concurrently, then processes Spotify → TIDAL and TIDAL → Spotify concurrently. After each snapshot has been taken, it uses bounded `Parallel.ForEachAsync` workers for independent ISRC searches and writes. Results are kept in original source order for deterministic CSV reports. A per-destination-track asynchronous gate prevents duplicate writes to the same favorite ID; failures do not permanently reserve that ID.
+
+TIDAL's relationship-list pages depend on cursor links and must be fetched in order. After enumerating the complete collection, the adapter fetches individual track details in parallel. Its default worker limit is **5**, configurable for CLI sync via `--max-concurrency N` (valid range 1–32). The source's Spotify paginated endpoints also retain their required page ordering.
+
+Workers report `SyncProgress` snapshots to a shared `SyncConsoleProgress` instance owned by the CLI. The coordinator serializes console output, ignores stale/out-of-order updates, and emits approximately 5% increments plus the first and final counts for each stage. There is no requirement for a dedicated managed OS thread.
+
+**Optional destructive cleanup:** `--prune-unavailable-tidal` opts into removal of TIDAL favorites only when a detail lookup returns 404 or the response omits track metadata attributes. This is **not** a general missing-ISRC or unmatched-track cleanup. The adapter completes collection enumeration and hydration before deleting anything, and aborts when *all* tracks have unavailable metadata to avoid mass deletion caused by a permission or catalog outage. With `--dry-run`, removal is previewed and no DELETE requests are sent. Deletions use JSON:API `DELETE /v2/userCollectionTracks/me/relationships/items`, with `{ "data": [{ "id": "...", "type": "tracks" }] }`, using source-generated DTO serialization and the existing `collection.write` scope. Any DELETE failure surfaces as an error.
+
+Concurrency makes simultaneous OAuth token refresh attempts possible. `OAuthManager.AccessToken` serializes refreshes independently for each provider, so concurrent workers reuse a newly refreshed token. Unit/acceptance tests must cover bounded worker execution, duplicate match writes, cancellation, 404/403 handling, dry-run cleanup, and progress.
+
 ## Run automated tests
 
 The repository has separate **xUnit** test projects. Docker, live music accounts, and application credentials are not needed for these suites.
@@ -166,7 +178,7 @@ Use **only** the command corresponding to the OS and architecture of the machine
 
 All production JSON request/response objects must use **concrete DTO types** with source-generated `System.Text.Json` metadata from `AppJsonContext` (`ApiJsonModels.cs`). Use the `JsonSerializer` overloads that accept the relevant generated `JsonTypeInfo<T>` rather than reflection-based or loosely typed serialization. Native AOT, trimming, and compiler warnings are checked in CI.
 
-The synchronization algorithm deliberately matches a destination only when ISRC, normalized title, and primary artist identify exactly one candidate. Never weaken matching or introduce removal of existing favorites without explicitly changing the stated product behavior and tests.
+The synchronization algorithm deliberately matches a destination only when ISRC, normalized title, and primary artist identify exactly one candidate. Never weaken matching or introduce additional removal behavior beyond the opt-in unavailable-TIDAL-metadata cleanup without explicitly changing the stated product behavior and tests.
 
 
 ### Diagnosing TIDAL HTTP 404 responses
