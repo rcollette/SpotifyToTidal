@@ -112,5 +112,5 @@ jobs:
           if [[ "$PRERELEASE" == "true" ]]; then
             gh release create "$VERSION" release-assets/* --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes --prerelease
           else
-            gh release create "$VERSION" release-assets/*.zip --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes
+            gh release create "$VERSION" release-assets/* --target "$GITHUB_SHA" --title "SpotifyToTidal $VERSION" --generate-notes
           fi
