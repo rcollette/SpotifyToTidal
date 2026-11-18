@@ -573,6 +573,61 @@ public sealed class HttpAdapterTests
     }
 
 
+    private sealed class ConcurrentTidalMetadataHandler : HttpMessageHandler
+    {
+        readonly object gate = new();
+        int active;
+        public int Peak { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath ==
+                "/v2/userCollectionTracks/me/relationships/items")
+                return Response(new TidalCollectionPage
+                {
+                    Data = Enumerable.Range(1, 9)
+                        .Select(i => new TidalResourceDto
+                        {
+                            Id = "item-" + i, Type = "tracks"
+                        }).ToArray()
+                }, AppJsonContext.Default.TidalCollectionPage);
+
+            Assert.StartsWith("/v2/tracks/", request.RequestUri.AbsolutePath);
+            var current = Interlocked.Increment(ref active);
+            lock (gate) Peak = Math.Max(Peak, current);
+            try
+            {
+                await Task.Delay(30, ct);
+                var id = request.RequestUri.AbsolutePath["/v2/tracks/".Length..];
+                return Response(new TidalTrackDetail
+                {
+                    Data = TidalTrack(id, artistFallback: "Singer", relationship: false)
+                }, AppJsonContext.Default.TidalTrackDetail);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref active);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Tidal_track_details_run_concurrently_up_to_worker_limit()
+    {
+        var handler = new ConcurrentTidalMetadataHandler();
+        var progress = new System.Collections.Concurrent.ConcurrentBag<SyncProgress>();
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 3, progress: progress.Add);
+        var songs = await library.GetFavorites();
+        Assert.Equal(3, handler.Peak);
+        Assert.Equal(9, songs.Count);
+        Assert.Equal("item-1", songs[0].Id);
+        Assert.Equal("item-9", songs[8].Id);
+        Assert.Contains(progress, p => p.Stage == "TIDAL metadata" &&
+            p.Completed == 9 && p.Total == 9);
+    }
+
     [Fact]
     public async Task Tidal_metadata_404_can_be_pruned_only_when_explicitly_enabled()
     {
