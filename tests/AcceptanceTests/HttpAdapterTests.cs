@@ -630,6 +630,40 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
+    public async Task Tidal_null_track_entry_is_ignored_safely()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalTrackPage
+        {
+            Data = [null!]
+        }, AppJsonContext.Default.TidalTrackPage));
+        Assert.Empty(await Tidal(handler).SearchIsrc("USAAA0000001"));
+    }
+
+    [Fact]
+    public async Task Prune_preview_can_run_without_a_progress_listener()
+    {
+        var handler = new ScriptedHandler();
+        handler.Push(Response(new TidalCollectionPage
+        {
+            Data = [
+                new TidalResourceDto { Id = "missing", Type = "tracks" },
+                new TidalResourceDto { Id = "available", Type = "tracks" }
+            ]
+        }, AppJsonContext.Default.TidalCollectionPage));
+        handler.Push(new HttpResponseMessage(HttpStatusCode.NotFound));
+        handler.Push(Response(new TidalTrackDetail
+        {
+            Data = TidalTrack("available"), Included = [TidalArtist()]
+        }, AppJsonContext.Default.TidalTrackDetail));
+        var library = new TidalLibrary(new HttpClient(handler), () => Task.FromResult("test-access"),
+            new Uri("https://tidal.test/"), maxConcurrency: 1,
+            deleteUnavailable: true, dryRun: true);
+        Assert.Equal("available", Assert.Single(await library.GetFavorites()).Id);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
     public async Task Tidal_metadata_404_can_be_pruned_only_when_explicitly_enabled()
     {
         var handler = new ScriptedHandler();
