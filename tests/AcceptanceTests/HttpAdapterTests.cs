@@ -510,6 +510,127 @@ public sealed class HttpAdapterTests
     }
 
     [Fact]
+    public void Local_rate_limit_budget_and_window_must_be_positive()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ApiRateLimiter("Spotify", 0, TimeSpan.FromSeconds(30)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ApiRateLimiter("Spotify", -1, TimeSpan.FromSeconds(30)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ApiRateLimiter("Spotify", null, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void Expired_http_date_retry_after_has_zero_duration()
+    {
+        var clock = new ManualClock();
+        var limiter = new ApiRateLimiter("Spotify", null, TimeSpan.FromSeconds(30),
+            clock.Wait, () => clock.Now);
+        var (delay, policy) = limiter.Register429(
+            new RetryConditionHeaderValue(clock.Now.AddMinutes(-1)));
+        Assert.Equal(TimeSpan.Zero, delay);
+        Assert.Contains("HTTP-date", policy);
+    }
+
+    [Fact]
+    public void Server_errors_honor_retry_after_seconds_and_http_dates()
+    {
+        var now = new DateTimeOffset(2026, 11, 17, 12, 0, 0, TimeSpan.Zero);
+        var seconds = ApiRateLimiter.ServerRetry(
+            new RetryConditionHeaderValue(TimeSpan.FromSeconds(77)), 0, now);
+        Assert.Equal(TimeSpan.FromSeconds(77), seconds.Delay);
+        Assert.Contains("delta-seconds", seconds.Policy);
+
+        var future = ApiRateLimiter.ServerRetry(
+            new RetryConditionHeaderValue(now.AddSeconds(91)), 0, now);
+        Assert.Equal(TimeSpan.FromSeconds(91), future.Delay);
+        Assert.Contains("HTTP-date", future.Policy);
+
+        var past = ApiRateLimiter.ServerRetry(
+            new RetryConditionHeaderValue(now.AddSeconds(-1)), 0, now);
+        Assert.Equal(TimeSpan.Zero, past.Delay);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("{\"error\":\"not-an-object\"}")]
+    [InlineData("{\"error\":{}}")]
+    [InlineData("{\"error\":{\"reason\":123}}")]
+    [InlineData("{\"error\":{\"reason\":\"SOME_OTHER_REASON\"}}")]
+    [InlineData("not valid json")]
+    public async Task Spotify_429_without_quota_reason_remains_retryable(string body)
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent(body)
+        });
+        h.Push(Response(new SpotifySavedTracksPage(), AppJsonContext.Default.SpotifySavedTracksPage));
+        List<TimeSpan> waits = [];
+        Assert.Empty(await Spotify(h, (delay, _) => {
+            waits.Add(delay);
+            return Task.CompletedTask;
+        }).GetFavorites());
+        Assert.Equal(TimeSpan.FromSeconds(2), Assert.Single(waits));
+    }
+
+    private sealed class BrokenResponseContent(bool timeout) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            timeout ? Task.FromException(new TaskCanceledException("simulated read timeout")) :
+                Task.FromException(new HttpRequestException("simulated read failure"));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Response_body_read_failures_are_logged(bool timeout)
+    {
+        var h = new ScriptedHandler();
+        h.Push(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new BrokenResponseContent(timeout)
+        });
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            if (timeout)
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Spotify(h).GetFavorites());
+            else
+                await Assert.ThrowsAsync<HttpRequestException>(() => Spotify(h).GetFavorites());
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("Error: Spotify response GET /v1/me/tracks could not be read", output.ToString());
+        Assert.DoesNotContain("simulated read", output.ToString());
+    }
+
+    [Fact]
+    public async Task Transport_timeouts_are_logged_without_retrying()
+    {
+        var h = new ScriptedHandler();
+        h.Push(_ => throw new TaskCanceledException("timed out"));
+        var original = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Spotify(h).GetFavorites());
+        }
+        finally { Console.SetError(original); }
+        Assert.Contains("TaskCanceledException", output.ToString());
+        Assert.DoesNotContain("timed out", output.ToString());
+    }
+
+    [Fact]
     public async Task Service_unavailable_uses_exponential_retry_without_retry_after()
     {
         var h = new ScriptedHandler();
