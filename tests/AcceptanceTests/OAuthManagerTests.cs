@@ -331,4 +331,21 @@ public sealed class OAuthManagerTests
         Assert.Equal(1, server.Calls);
     }
 
+    [Fact]
+    public async Task Concurrent_access_token_requests_share_one_refresh()
+    {
+        string path = TemporaryPath();
+        Directory.CreateDirectory(path);
+        await File.WriteAllTextAsync(Path.Combine(path, "tidal-token.json"),
+            JsonSerializer.Serialize(new OAuthToken("expired", "old-refresh",
+                DateTimeOffset.UtcNow.AddMinutes(-1)), AppJsonContext.Default.OAuthToken));
+        var server = new FakeTokenServer();
+        using var http = new HttpClient(server);
+        var manager = new OAuthManager(path, Settings(), http);
+        var requests = Enumerable.Range(0, 20).Select(_ => manager.AccessToken("tidal"));
+        var tokens = await Task.WhenAll(requests);
+        Assert.All(tokens, t => Assert.Equal("issued-access", t));
+        Assert.Equal(1, server.Calls);
+    }
+
 }
